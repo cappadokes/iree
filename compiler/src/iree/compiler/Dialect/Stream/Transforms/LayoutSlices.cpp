@@ -10,6 +10,7 @@
 #include "iree/compiler/Dialect/Stream/IR/StreamOps.h"
 #include "iree/compiler/Dialect/Stream/IR/StreamTypes.h"
 #include "iree/compiler/Dialect/Stream/Transforms/Passes.h"
+#include "iree/compiler/Dialect/Stream/Transforms/RusToy.h"
 #include "iree/compiler/Dialect/Util/IR/UtilDialect.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
@@ -66,6 +67,8 @@ packStaticSlicesGreedily(IREE::Stream::ResourcePackOp packOp, Value baseOffset,
     int64_t staticSize = 0;
   };
   static constexpr int64_t UNASSIGNED = INT64_MAX;
+
+  say_hello();
 
   std::list<Reservation> reservations;
   int64_t highwaterMark = 0;

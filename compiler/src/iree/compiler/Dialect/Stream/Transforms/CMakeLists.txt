@@ -15,6 +15,7 @@ iree_cc_library(
     Transforms
   HDRS
     "Passes.h"
+    "RusToy.h"
   SRCS
     "AnnotateAffinities.cpp"
     "AnnotateDispatchArguments.cpp"
@@ -36,6 +37,7 @@ iree_cc_library(
     "Passes.h.inc"
     "PropagateTimepoints.cpp"
     "RefineUsage.cpp"
+    "RusToy.cpp"
     "ScheduleAllocation.cpp"
     "ScheduleConcurrency.cpp"
     "ScheduleExecution.cpp"
@@ -45,6 +47,7 @@ iree_cc_library(
     "VerifyLowerings.cpp"
   DEPS
     ::PassesIncGen
+    RuStuff
     LLVMSupport
     MLIRAffineDialect
     MLIRAnalysis
@@ -95,3 +98,16 @@ iree_tablegen_library(
 )
 
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###
+
+add_library(
+  RuStuff
+  STATIC
+  IMPORTED
+)
+set_property(
+  TARGET
+    RuStuff
+  PROPERTY
+    IMPORTED_LOCATION
+      "/home/iree/toy_cxx/target/debug/libtoy_cxx.a"
+)
