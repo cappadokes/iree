@@ -58,6 +58,8 @@ packStaticSlicesGreedily(IREE::Stream::ResourcePackOp packOp, Value baseOffset,
                          MutableArrayRef<Slice> slices,
                          IREE::Stream::ResourceConfigAttr resourceConfig,
                          IndexSet &indexSet, OpBuilder &builder) {
+  rust::cxxbridge1::Box<Clock> clk = timer_start();
+
   int64_t offsetAlignment = resourceConfig.getMinBufferOffsetAlignment();
   int64_t rangeAlignment = resourceConfig.getMinBufferRangeAlignment();
 
@@ -67,8 +69,6 @@ packStaticSlicesGreedily(IREE::Stream::ResourcePackOp packOp, Value baseOffset,
     int64_t staticSize = 0;
   };
   static constexpr int64_t UNASSIGNED = INT64_MAX;
-
-  say_hello();
 
   std::list<Reservation> reservations;
   int64_t highwaterMark = 0;
@@ -125,6 +125,9 @@ packStaticSlicesGreedily(IREE::Stream::ResourcePackOp packOp, Value baseOffset,
   }
 
   highwaterMark = IREE::Util::align(highwaterMark, rangeAlignment);
+
+  timer_end(clk.into_raw());
+
   return builder.createOrFold<arith::AddIOp>(packOp.getLoc(), baseOffset,
                                              indexSet.get(highwaterMark));
 }
