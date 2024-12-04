@@ -1,11 +1,23 @@
 use std::time::{Instant, Duration};
+use cxx::CxxVector;
+use ffi::PlacedSlice;
 
 #[cxx::bridge]
 mod ffi {
+    /// A memory buffer, annotated with
+    /// its lifetime and an offset.
+    struct PlacedSlice {
+        pub start:  i64,
+        pub end:    i64,
+        pub size:   i64,
+        pub offset: i64,
+    }
+
     extern "Rust" {
         type Clock;
         fn timer_start() -> Box<Clock>;
-        unsafe fn timer_end(clk: *mut Clock);
+        fn timer_end(clk: Box<Clock>);
+        fn print_slices(data: &CxxVector<PlacedSlice>);
     }
 }
 
@@ -37,7 +49,16 @@ fn timer_start() -> Box<Clock> {
 
 /// Consumes a boxed [Clock] and prints the time elapsed
 /// since its creation to stdout.
-unsafe fn timer_end(clk: *mut Clock) {
-    let dur = clk.as_ref().unwrap().tick();
-    println!("Allocation time: {} μs", dur.as_micros());
+fn timer_end(clk: Box<Clock>) {
+    println!("Allocation time: {} μs", clk.tick().as_micros());
+}
+
+/// Lists the descriptions of a group of buffers.
+fn print_slices(data: &CxxVector<PlacedSlice>) {
+    for (idx, s) in data.iter().enumerate() {
+        println!(
+            "#{}:\tstart: {}, end: {}, size: {}, offset: {}",
+            idx, s.start, s.end, s.size, s.offset
+        );
+    }
 }

@@ -1,7 +1,10 @@
 #include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <new>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace rust {
 inline namespace cxxbridge1 {
@@ -240,10 +243,32 @@ std::size_t align_of() {
   return layout::align_of<T>();
 }
 #endif // CXXBRIDGE1_LAYOUT
+
+namespace {
+template <typename T>
+void destroy(T *ptr) {
+  ptr->~T();
+}
+} // namespace
 } // namespace cxxbridge1
 } // namespace rust
 
+struct PlacedSlice;
 struct Clock;
+
+#ifndef CXXBRIDGE1_STRUCT_PlacedSlice
+#define CXXBRIDGE1_STRUCT_PlacedSlice
+// A memory buffer, annotated with
+// its lifetime and an offset.
+struct PlacedSlice final {
+  ::std::int64_t start;
+  ::std::int64_t end;
+  ::std::int64_t size;
+  ::std::int64_t offset;
+
+  using IsRelocatable = ::std::true_type;
+};
+#endif // CXXBRIDGE1_STRUCT_PlacedSlice
 
 #ifndef CXXBRIDGE1_STRUCT_Clock
 #define CXXBRIDGE1_STRUCT_Clock
@@ -266,6 +291,8 @@ extern "C" {
 ::Clock *cxxbridge1$timer_start() noexcept;
 
 void cxxbridge1$timer_end(::Clock *clk) noexcept;
+
+void cxxbridge1$print_slices(::std::vector<::PlacedSlice> const &data) noexcept;
 } // extern "C"
 
 ::std::size_t Clock::layout::size() noexcept {
@@ -280,14 +307,53 @@ void cxxbridge1$timer_end(::Clock *clk) noexcept;
   return ::rust::Box<::Clock>::from_raw(cxxbridge1$timer_start());
 }
 
-void timer_end(::Clock *clk) noexcept {
-  cxxbridge1$timer_end(clk);
+void timer_end(::rust::Box<::Clock> clk) noexcept {
+  cxxbridge1$timer_end(clk.into_raw());
+}
+
+void print_slices(::std::vector<::PlacedSlice> const &data) noexcept {
+  cxxbridge1$print_slices(data);
 }
 
 extern "C" {
 ::Clock *cxxbridge1$box$Clock$alloc() noexcept;
 void cxxbridge1$box$Clock$dealloc(::Clock *) noexcept;
 void cxxbridge1$box$Clock$drop(::rust::Box<::Clock> *ptr) noexcept;
+
+::std::vector<::PlacedSlice> *cxxbridge1$std$vector$PlacedSlice$new() noexcept {
+  return new ::std::vector<::PlacedSlice>();
+}
+::std::size_t cxxbridge1$std$vector$PlacedSlice$size(::std::vector<::PlacedSlice> const &s) noexcept {
+  return s.size();
+}
+::PlacedSlice *cxxbridge1$std$vector$PlacedSlice$get_unchecked(::std::vector<::PlacedSlice> *s, ::std::size_t pos) noexcept {
+  return &(*s)[pos];
+}
+void cxxbridge1$std$vector$PlacedSlice$push_back(::std::vector<::PlacedSlice> *v, ::PlacedSlice *value) noexcept {
+  v->push_back(::std::move(*value));
+  ::rust::destroy(value);
+}
+void cxxbridge1$std$vector$PlacedSlice$pop_back(::std::vector<::PlacedSlice> *v, ::PlacedSlice *out) noexcept {
+  ::new (out) ::PlacedSlice(::std::move(v->back()));
+  v->pop_back();
+}
+static_assert(sizeof(::std::unique_ptr<::std::vector<::PlacedSlice>>) == sizeof(void *), "");
+static_assert(alignof(::std::unique_ptr<::std::vector<::PlacedSlice>>) == alignof(void *), "");
+void cxxbridge1$unique_ptr$std$vector$PlacedSlice$null(::std::unique_ptr<::std::vector<::PlacedSlice>> *ptr) noexcept {
+  ::new (ptr) ::std::unique_ptr<::std::vector<::PlacedSlice>>();
+}
+void cxxbridge1$unique_ptr$std$vector$PlacedSlice$raw(::std::unique_ptr<::std::vector<::PlacedSlice>> *ptr, ::std::vector<::PlacedSlice> *raw) noexcept {
+  ::new (ptr) ::std::unique_ptr<::std::vector<::PlacedSlice>>(raw);
+}
+::std::vector<::PlacedSlice> const *cxxbridge1$unique_ptr$std$vector$PlacedSlice$get(::std::unique_ptr<::std::vector<::PlacedSlice>> const &ptr) noexcept {
+  return ptr.get();
+}
+::std::vector<::PlacedSlice> *cxxbridge1$unique_ptr$std$vector$PlacedSlice$release(::std::unique_ptr<::std::vector<::PlacedSlice>> &ptr) noexcept {
+  return ptr.release();
+}
+void cxxbridge1$unique_ptr$std$vector$PlacedSlice$drop(::std::unique_ptr<::std::vector<::PlacedSlice>> *ptr) noexcept {
+  ptr->~unique_ptr();
+}
 } // extern "C"
 
 namespace rust {

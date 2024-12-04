@@ -58,6 +58,8 @@ packStaticSlicesGreedily(IREE::Stream::ResourcePackOp packOp, Value baseOffset,
                          MutableArrayRef<Slice> slices,
                          IREE::Stream::ResourceConfigAttr resourceConfig,
                          IndexSet &indexSet, OpBuilder &builder) {
+  std::vector<PlacedSlice> trojan;
+
   rust::cxxbridge1::Box<Clock> clk = timer_start();
 
   int64_t offsetAlignment = resourceConfig.getMinBufferOffsetAlignment();
@@ -110,6 +112,16 @@ packStaticSlicesGreedily(IREE::Stream::ResourcePackOp packOp, Value baseOffset,
     reservation.slice = &slice;
     reservation.staticOffset = bestOffset;
     reservation.staticSize = alignedSize;
+
+    // Prepare the corresponding structure
+    // for processing in the Rust side.
+    PlacedSlice ps;
+    ps.start = slice.lifetimeStart;
+    ps.end = slice.lifetimeEnd;
+    ps.size = alignedSize;
+    ps.offset = bestOffset;
+    trojan.push_back(ps);
+
     auto insertionIt = reservations.begin();
     while (insertionIt != reservations.end() &&
            insertionIt->staticOffset < reservation.staticOffset) {
@@ -126,7 +138,8 @@ packStaticSlicesGreedily(IREE::Stream::ResourcePackOp packOp, Value baseOffset,
 
   highwaterMark = IREE::Util::align(highwaterMark, rangeAlignment);
 
-  timer_end(clk.into_raw());
+  timer_end(std::move(clk));
+  print_slices(trojan);
 
   return builder.createOrFold<arith::AddIOp>(packOp.getLoc(), baseOffset,
                                              indexSet.get(highwaterMark));

@@ -1,8 +1,10 @@
 #pragma once
 #include <cstddef>
+#include <cstdint>
 #include <new>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace rust {
 inline namespace cxxbridge1 {
@@ -244,7 +246,22 @@ std::size_t align_of() {
 } // namespace cxxbridge1
 } // namespace rust
 
+struct PlacedSlice;
 struct Clock;
+
+#ifndef CXXBRIDGE1_STRUCT_PlacedSlice
+#define CXXBRIDGE1_STRUCT_PlacedSlice
+// A memory buffer, annotated with
+// its lifetime and an offset.
+struct PlacedSlice final {
+  ::std::int64_t start;
+  ::std::int64_t end;
+  ::std::int64_t size;
+  ::std::int64_t offset;
+
+  using IsRelocatable = ::std::true_type;
+};
+#endif // CXXBRIDGE1_STRUCT_PlacedSlice
 
 #ifndef CXXBRIDGE1_STRUCT_Clock
 #define CXXBRIDGE1_STRUCT_Clock
@@ -262,4 +279,6 @@ private:
 
 ::rust::Box<::Clock> timer_start() noexcept;
 
-void timer_end(::Clock *clk) noexcept;
+void timer_end(::rust::Box<::Clock> clk) noexcept;
+
+void print_slices(::std::vector<::PlacedSlice> const &data) noexcept;
