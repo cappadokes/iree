@@ -55,9 +55,10 @@ fn timer_end(clk: Box<Clock>) {
 
 /// Lists the descriptions of a group of buffers.
 fn print_slices(data: &CxxVector<PlacedSlice>) {
+    println!("id,lower,upper,size,offset");
     for (idx, s) in data.iter().enumerate() {
         println!(
-            "#{}:\tstart: {}, end: {}, size: {}, offset: {}",
+            "{},{},{},{},{}",
             idx, s.start, s.end, s.size, s.offset
         );
     }
