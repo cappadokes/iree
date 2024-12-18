@@ -58,9 +58,20 @@ packStaticSlicesGreedily(IREE::Stream::ResourcePackOp packOp, Value baseOffset,
                          MutableArrayRef<Slice> slices,
                          IREE::Stream::ResourceConfigAttr resourceConfig,
                          IndexSet &indexSet, OpBuilder &builder) {
+  // RUST INTEGRATION INIT START
+  // ---------------------------
+
+  // `Slice` is defined in Stream/IR/StreamOps.td
+  // `PlacedSlice` is an almost-copy of `Slice`, defined in Stream/Transforms/RusToy.h
+  // The `trojan` vector will carry all slices over the FFI
   std::vector<PlacedSlice> trojan;
 
+  // `Box` points to values living in the Rust heap
+  // `Clock` is a Rust type holding a timer
   rust::cxxbridge1::Box<Clock> clk = timer_start();
+
+  //--------------------------
+  // RUST INTEGRATION INIT END
 
   int64_t offsetAlignment = resourceConfig.getMinBufferOffsetAlignment();
   int64_t rangeAlignment = resourceConfig.getMinBufferRangeAlignment();
@@ -113,14 +124,20 @@ packStaticSlicesGreedily(IREE::Stream::ResourcePackOp packOp, Value baseOffset,
     reservation.staticOffset = bestOffset;
     reservation.staticSize = alignedSize;
 
-    // Prepare the corresponding structure
-    // for processing in the Rust side.
+    // RUST INTEGRATION BODY START
+    // ---------------------------
+
+    // `PlacedSlice` is a "shared" type, i.e.,
+    // usable by CPP.
     PlacedSlice ps;
     ps.start = slice.lifetimeStart;
     ps.end = slice.lifetimeEnd;
     ps.size = alignedSize;
     ps.offset = bestOffset;
     trojan.push_back(ps);
+
+    // ---------------------------
+    // RUST INTEGRATION BODY END
 
     auto insertionIt = reservations.begin();
     while (insertionIt != reservations.end() &&
@@ -138,8 +155,14 @@ packStaticSlicesGreedily(IREE::Stream::ResourcePackOp packOp, Value baseOffset,
 
   highwaterMark = IREE::Util::align(highwaterMark, rangeAlignment);
 
+  // RUST INTEGRATION EPILOGUE START
+  // -------------------------------
+
   timer_end(std::move(clk));
   print_slices(trojan);
+
+  // -------------------------------
+  // RUST INTEGRATION EPILOGUE END
 
   return builder.createOrFold<arith::AddIOp>(packOp.getLoc(), baseOffset,
                                              indexSet.get(highwaterMark));
