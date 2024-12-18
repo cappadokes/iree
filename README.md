@@ -1,3 +1,34 @@
+> This is an IREE fork introducing interoperability with Rust. It already contains a minimal proof of concept: `iree/toy_cxx` defines an FFI exposing the following capabilities:
+> 
+> - measure execution time of arbitrary code regions
+> - print the reservations made in the context of `Dialect/Stream/Transforms/LayoutSlices.cpp`
+>
+> Both of these capabilities have already been integrated in IREE's build system, in the form of:
+>
+> 1. Two new source files (`Dialect/Stream/Transforms/RusToy.*`)
+> 2. The `iree/toy_cxx` project itself
+> 3. A modified `Dialect/Stream/Transforms/CMakeLists.txt` file incorporating the above
+> 4. A similarly modified `Dialect/Stream/Transforms/LayoutSlices.cpp` file
+>
+> The workflow for tinkering with the above is:
+>
+> 1. Install Rust >= 1.82.0
+> 2. Run `cargo install cxxbridge-cmd` (only if you plan to make changes on the Rust side and introduce them here. For a proof-of-concept, bypass this step and steps 5, 6).
+> 3. `cd iree/toy_cxx`
+> 4. `cargo build`
+> 5. `cxxbridge --header src/lib.rs -o iree/[...]/Stream/Transforms RusToy.h`
+> 6. `cxxbridge src/lib.rs -o iree/[...]/Stream/Transforms RusToy.cpp` (this and the previous step have already made for you)
+> 7. Adapt the hardcoded `libtoy_cxx.a` path in `Stream/Transforms/CMakeLists.txt` so as to reflect the full path to it in your setup (or be smarter than me and use some env var)
+> 8. Build IREE as usual.
+>
+> If all goes well, you should see messages of the following format appearing in your build console:
+> ```
+> Allocation time: 62 μs
+> id,lower,upper,size,offset
+> 0,0,0,64,0
+> 1,0,0.64,64
+> ```
+
 # IREE: Intermediate Representation Execution Environment
 
 <p><img src="docs/website/docs/assets/images/IREE_Logo_Icon_Color.svg" width="48px"></p>
