@@ -1,14 +1,10 @@
-> This is an IREE fork introducing interoperability with Rust. It already contains a minimal proof of concept: `iree/toy_cxx` defines an FFI exposing the following capabilities:
-> 
-> - measure execution time of arbitrary code regions
-> - print the reservations made in the context of `Dialect/Stream/Transforms/LayoutSlices.cpp`
->
-> Both of these capabilities have already been integrated in IREE's build system, in the form of:
+> This is an IREE fork introducing interoperability with `idealloc`, a static allocator written in Rust. This interoperability comes in the form of:
 >
 > 1. Two new source files (`Dialect/Stream/Transforms/RusToy.*`)
 > 2. The `iree/toy_cxx` project itself
 > 3. A modified `Dialect/Stream/Transforms/CMakeLists.txt` file incorporating the above
 > 4. A similarly modified `Dialect/Stream/Transforms/LayoutSlices.cpp` file
+> 5. The `idealloc` source code itself.
 >
 > The workflow for tinkering with the above is:
 >
@@ -23,10 +19,12 @@
 >
 > If all goes well, you should see messages of the following format appearing in your build console:
 > ```
-> Allocation time: 62 μs
-> id,lower,upper,size,offset
-> 0,0,0,64,0
-> 1,0,0.64,64
+> Events processed.
+> Prelude overhead: 106 μs
+> Total allocation time: 205 μs
+> Makespan:       128 bytes
+> LOAD:           128 bytes
+> Fragmentation:   0.00%
 > ```
 
 # IREE: Intermediate Representation Execution Environment

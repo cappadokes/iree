@@ -59,8 +59,6 @@ packStaticSlicesGreedily(IREE::Stream::ResourcePackOp packOp, Value baseOffset,
                          MutableArrayRef<Slice> slices,
                          IREE::Stream::ResourceConfigAttr resourceConfig,
                          IndexSet &indexSet, OpBuilder &builder) {
-  
-  printf("Packing STARTS!\n");
   // RUST INTEGRATION INIT START
   // ---------------------------
 
@@ -138,7 +136,6 @@ packStaticSlicesGreedily(IREE::Stream::ResourcePackOp packOp, Value baseOffset,
   }
 
   highwaterMark = IREE::Util::align(highwaterMark, rangeAlignment);
-  printf("Packing DONE!\n");
 
   return builder.createOrFold<arith::AddIOp>(packOp.getLoc(), baseOffset,
                                              indexSet.get(highwaterMark));
