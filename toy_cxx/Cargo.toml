@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 cxx         = "1.0.130"
+coreba      = { path = "../idealloc/coreba" }
 
 [build-dependencies]
 cxx-build   = "1.0.130"

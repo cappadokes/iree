@@ -1,7 +1,13 @@
+#include <algorithm>
+#include <array>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
+#include <iterator>
 #include <memory>
 #include <new>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -9,6 +15,328 @@
 namespace rust {
 inline namespace cxxbridge1 {
 // #include "rust/cxx.h"
+
+#ifndef CXXBRIDGE1_PANIC
+#define CXXBRIDGE1_PANIC
+template <typename Exception>
+void panic [[noreturn]] (const char *msg);
+#endif // CXXBRIDGE1_PANIC
+
+namespace {
+template <typename T>
+class impl;
+} // namespace
+
+template <typename T>
+::std::size_t size_of();
+template <typename T>
+::std::size_t align_of();
+
+#ifndef CXXBRIDGE1_RUST_SLICE
+#define CXXBRIDGE1_RUST_SLICE
+namespace detail {
+template <bool>
+struct copy_assignable_if {};
+
+template <>
+struct copy_assignable_if<false> {
+  copy_assignable_if() noexcept = default;
+  copy_assignable_if(const copy_assignable_if &) noexcept = default;
+  copy_assignable_if &operator=(const copy_assignable_if &) & noexcept = delete;
+  copy_assignable_if &operator=(copy_assignable_if &&) & noexcept = default;
+};
+} // namespace detail
+
+template <typename T>
+class Slice final
+    : private detail::copy_assignable_if<std::is_const<T>::value> {
+public:
+  using value_type = T;
+
+  Slice() noexcept;
+  Slice(T *, std::size_t count) noexcept;
+
+  template <typename C>
+  explicit Slice(C &c) : Slice(c.data(), c.size()) {}
+
+  Slice &operator=(const Slice<T> &) & noexcept = default;
+  Slice &operator=(Slice<T> &&) & noexcept = default;
+
+  T *data() const noexcept;
+  std::size_t size() const noexcept;
+  std::size_t length() const noexcept;
+  bool empty() const noexcept;
+
+  T &operator[](std::size_t n) const noexcept;
+  T &at(std::size_t n) const;
+  T &front() const noexcept;
+  T &back() const noexcept;
+
+  Slice(const Slice<T> &) noexcept = default;
+  ~Slice() noexcept = default;
+
+  class iterator;
+  iterator begin() const noexcept;
+  iterator end() const noexcept;
+
+  void swap(Slice &) noexcept;
+
+private:
+  class uninit;
+  Slice(uninit) noexcept;
+  friend impl<Slice>;
+  friend void sliceInit(void *, const void *, std::size_t) noexcept;
+  friend void *slicePtr(const void *) noexcept;
+  friend std::size_t sliceLen(const void *) noexcept;
+
+  std::array<std::uintptr_t, 2> repr;
+};
+
+template <typename T>
+class Slice<T>::iterator final {
+public:
+#if __cplusplus >= 202002L
+  using iterator_category = std::contiguous_iterator_tag;
+#else
+  using iterator_category = std::random_access_iterator_tag;
+#endif
+  using value_type = T;
+  using difference_type = std::ptrdiff_t;
+  using pointer = typename std::add_pointer<T>::type;
+  using reference = typename std::add_lvalue_reference<T>::type;
+
+  reference operator*() const noexcept;
+  pointer operator->() const noexcept;
+  reference operator[](difference_type) const noexcept;
+
+  iterator &operator++() noexcept;
+  iterator operator++(int) noexcept;
+  iterator &operator--() noexcept;
+  iterator operator--(int) noexcept;
+
+  iterator &operator+=(difference_type) noexcept;
+  iterator &operator-=(difference_type) noexcept;
+  iterator operator+(difference_type) const noexcept;
+  friend inline iterator operator+(difference_type lhs, iterator rhs) noexcept {
+    return rhs + lhs;
+  }
+  iterator operator-(difference_type) const noexcept;
+  difference_type operator-(const iterator &) const noexcept;
+
+  bool operator==(const iterator &) const noexcept;
+  bool operator!=(const iterator &) const noexcept;
+  bool operator<(const iterator &) const noexcept;
+  bool operator<=(const iterator &) const noexcept;
+  bool operator>(const iterator &) const noexcept;
+  bool operator>=(const iterator &) const noexcept;
+
+private:
+  friend class Slice;
+  void *pos;
+  std::size_t stride;
+};
+
+#if __cplusplus >= 202002L
+static_assert(std::ranges::contiguous_range<rust::Slice<const uint8_t>>);
+static_assert(std::contiguous_iterator<rust::Slice<const uint8_t>::iterator>);
+#endif
+
+template <typename T>
+Slice<T>::Slice() noexcept {
+  sliceInit(this, reinterpret_cast<void *>(align_of<T>()), 0);
+}
+
+template <typename T>
+Slice<T>::Slice(T *s, std::size_t count) noexcept {
+  assert(s != nullptr || count == 0);
+  sliceInit(this,
+            s == nullptr && count == 0
+                ? reinterpret_cast<void *>(align_of<T>())
+                : const_cast<typename std::remove_const<T>::type *>(s),
+            count);
+}
+
+template <typename T>
+T *Slice<T>::data() const noexcept {
+  return reinterpret_cast<T *>(slicePtr(this));
+}
+
+template <typename T>
+std::size_t Slice<T>::size() const noexcept {
+  return sliceLen(this);
+}
+
+template <typename T>
+std::size_t Slice<T>::length() const noexcept {
+  return this->size();
+}
+
+template <typename T>
+bool Slice<T>::empty() const noexcept {
+  return this->size() == 0;
+}
+
+template <typename T>
+T &Slice<T>::operator[](std::size_t n) const noexcept {
+  assert(n < this->size());
+  auto ptr = static_cast<char *>(slicePtr(this)) + size_of<T>() * n;
+  return *reinterpret_cast<T *>(ptr);
+}
+
+template <typename T>
+T &Slice<T>::at(std::size_t n) const {
+  if (n >= this->size()) {
+    panic<std::out_of_range>("rust::Slice index out of range");
+  }
+  return (*this)[n];
+}
+
+template <typename T>
+T &Slice<T>::front() const noexcept {
+  assert(!this->empty());
+  return (*this)[0];
+}
+
+template <typename T>
+T &Slice<T>::back() const noexcept {
+  assert(!this->empty());
+  return (*this)[this->size() - 1];
+}
+
+template <typename T>
+typename Slice<T>::iterator::reference
+Slice<T>::iterator::operator*() const noexcept {
+  return *static_cast<T *>(this->pos);
+}
+
+template <typename T>
+typename Slice<T>::iterator::pointer
+Slice<T>::iterator::operator->() const noexcept {
+  return static_cast<T *>(this->pos);
+}
+
+template <typename T>
+typename Slice<T>::iterator::reference Slice<T>::iterator::operator[](
+    typename Slice<T>::iterator::difference_type n) const noexcept {
+  auto ptr = static_cast<char *>(this->pos) + this->stride * n;
+  return *reinterpret_cast<T *>(ptr);
+}
+
+template <typename T>
+typename Slice<T>::iterator &Slice<T>::iterator::operator++() noexcept {
+  this->pos = static_cast<char *>(this->pos) + this->stride;
+  return *this;
+}
+
+template <typename T>
+typename Slice<T>::iterator Slice<T>::iterator::operator++(int) noexcept {
+  auto ret = iterator(*this);
+  this->pos = static_cast<char *>(this->pos) + this->stride;
+  return ret;
+}
+
+template <typename T>
+typename Slice<T>::iterator &Slice<T>::iterator::operator--() noexcept {
+  this->pos = static_cast<char *>(this->pos) - this->stride;
+  return *this;
+}
+
+template <typename T>
+typename Slice<T>::iterator Slice<T>::iterator::operator--(int) noexcept {
+  auto ret = iterator(*this);
+  this->pos = static_cast<char *>(this->pos) - this->stride;
+  return ret;
+}
+
+template <typename T>
+typename Slice<T>::iterator &Slice<T>::iterator::operator+=(
+    typename Slice<T>::iterator::difference_type n) noexcept {
+  this->pos = static_cast<char *>(this->pos) + this->stride * n;
+  return *this;
+}
+
+template <typename T>
+typename Slice<T>::iterator &Slice<T>::iterator::operator-=(
+    typename Slice<T>::iterator::difference_type n) noexcept {
+  this->pos = static_cast<char *>(this->pos) - this->stride * n;
+  return *this;
+}
+
+template <typename T>
+typename Slice<T>::iterator Slice<T>::iterator::operator+(
+    typename Slice<T>::iterator::difference_type n) const noexcept {
+  auto ret = iterator(*this);
+  ret.pos = static_cast<char *>(this->pos) + this->stride * n;
+  return ret;
+}
+
+template <typename T>
+typename Slice<T>::iterator Slice<T>::iterator::operator-(
+    typename Slice<T>::iterator::difference_type n) const noexcept {
+  auto ret = iterator(*this);
+  ret.pos = static_cast<char *>(this->pos) - this->stride * n;
+  return ret;
+}
+
+template <typename T>
+typename Slice<T>::iterator::difference_type
+Slice<T>::iterator::operator-(const iterator &other) const noexcept {
+  auto diff = std::distance(static_cast<char *>(other.pos),
+                            static_cast<char *>(this->pos));
+  return diff / static_cast<typename Slice<T>::iterator::difference_type>(
+                    this->stride);
+}
+
+template <typename T>
+bool Slice<T>::iterator::operator==(const iterator &other) const noexcept {
+  return this->pos == other.pos;
+}
+
+template <typename T>
+bool Slice<T>::iterator::operator!=(const iterator &other) const noexcept {
+  return this->pos != other.pos;
+}
+
+template <typename T>
+bool Slice<T>::iterator::operator<(const iterator &other) const noexcept {
+  return this->pos < other.pos;
+}
+
+template <typename T>
+bool Slice<T>::iterator::operator<=(const iterator &other) const noexcept {
+  return this->pos <= other.pos;
+}
+
+template <typename T>
+bool Slice<T>::iterator::operator>(const iterator &other) const noexcept {
+  return this->pos > other.pos;
+}
+
+template <typename T>
+bool Slice<T>::iterator::operator>=(const iterator &other) const noexcept {
+  return this->pos >= other.pos;
+}
+
+template <typename T>
+typename Slice<T>::iterator Slice<T>::begin() const noexcept {
+  iterator it;
+  it.pos = slicePtr(this);
+  it.stride = size_of<T>();
+  return it;
+}
+
+template <typename T>
+typename Slice<T>::iterator Slice<T>::end() const noexcept {
+  iterator it = this->begin();
+  it.pos = static_cast<char *>(it.pos) + it.stride * this->size();
+  return it;
+}
+
+template <typename T>
+void Slice<T>::swap(Slice &rhs) noexcept {
+  std::swap(*this, rhs);
+}
+#endif // CXXBRIDGE1_RUST_SLICE
 
 #ifndef CXXBRIDGE1_RUST_BOX
 #define CXXBRIDGE1_RUST_BOX
@@ -27,7 +355,7 @@ public:
   explicit Box(const T &);
   explicit Box(T &&);
 
-  Box &operator=(Box &&) &noexcept;
+  Box &operator=(Box &&) & noexcept;
 
   const T *operator->() const noexcept;
   const T &operator*() const noexcept;
@@ -103,7 +431,7 @@ Box<T>::~Box() noexcept {
 }
 
 template <typename T>
-Box<T> &Box<T>::operator=(Box &&other) &noexcept {
+Box<T> &Box<T>::operator=(Box &&other) & noexcept {
   if (this->ptr) {
     this->drop();
   }
@@ -165,6 +493,251 @@ T *Box<T>::into_raw() noexcept {
 template <typename T>
 Box<T>::Box(uninit) noexcept {}
 #endif // CXXBRIDGE1_RUST_BOX
+
+#ifndef CXXBRIDGE1_RUST_BITCOPY_T
+#define CXXBRIDGE1_RUST_BITCOPY_T
+struct unsafe_bitcopy_t final {
+  explicit unsafe_bitcopy_t() = default;
+};
+#endif // CXXBRIDGE1_RUST_BITCOPY_T
+
+#ifndef CXXBRIDGE1_RUST_VEC
+#define CXXBRIDGE1_RUST_VEC
+template <typename T>
+class Vec final {
+public:
+  using value_type = T;
+
+  Vec() noexcept;
+  Vec(std::initializer_list<T>);
+  Vec(const Vec &);
+  Vec(Vec &&) noexcept;
+  ~Vec() noexcept;
+
+  Vec &operator=(Vec &&) & noexcept;
+  Vec &operator=(const Vec &) &;
+
+  std::size_t size() const noexcept;
+  bool empty() const noexcept;
+  const T *data() const noexcept;
+  T *data() noexcept;
+  std::size_t capacity() const noexcept;
+
+  const T &operator[](std::size_t n) const noexcept;
+  const T &at(std::size_t n) const;
+  const T &front() const noexcept;
+  const T &back() const noexcept;
+
+  T &operator[](std::size_t n) noexcept;
+  T &at(std::size_t n);
+  T &front() noexcept;
+  T &back() noexcept;
+
+  void reserve(std::size_t new_cap);
+  void push_back(const T &value);
+  void push_back(T &&value);
+  template <typename... Args>
+  void emplace_back(Args &&...args);
+  void truncate(std::size_t len);
+  void clear();
+
+  using iterator = typename Slice<T>::iterator;
+  iterator begin() noexcept;
+  iterator end() noexcept;
+
+  using const_iterator = typename Slice<const T>::iterator;
+  const_iterator begin() const noexcept;
+  const_iterator end() const noexcept;
+  const_iterator cbegin() const noexcept;
+  const_iterator cend() const noexcept;
+
+  void swap(Vec &) noexcept;
+
+  Vec(unsafe_bitcopy_t, const Vec &) noexcept;
+
+private:
+  void reserve_total(std::size_t new_cap) noexcept;
+  void set_len(std::size_t len) noexcept;
+  void drop() noexcept;
+
+  friend void swap(Vec &lhs, Vec &rhs) noexcept { lhs.swap(rhs); }
+
+  std::array<std::uintptr_t, 3> repr;
+};
+
+template <typename T>
+Vec<T>::Vec(std::initializer_list<T> init) : Vec{} {
+  this->reserve_total(init.size());
+  std::move(init.begin(), init.end(), std::back_inserter(*this));
+}
+
+template <typename T>
+Vec<T>::Vec(const Vec &other) : Vec() {
+  this->reserve_total(other.size());
+  std::copy(other.begin(), other.end(), std::back_inserter(*this));
+}
+
+template <typename T>
+Vec<T>::Vec(Vec &&other) noexcept : repr(other.repr) {
+  new (&other) Vec();
+}
+
+template <typename T>
+Vec<T>::~Vec() noexcept {
+  this->drop();
+}
+
+template <typename T>
+Vec<T> &Vec<T>::operator=(Vec &&other) & noexcept {
+  this->drop();
+  this->repr = other.repr;
+  new (&other) Vec();
+  return *this;
+}
+
+template <typename T>
+Vec<T> &Vec<T>::operator=(const Vec &other) & {
+  if (this != &other) {
+    this->drop();
+    new (this) Vec(other);
+  }
+  return *this;
+}
+
+template <typename T>
+bool Vec<T>::empty() const noexcept {
+  return this->size() == 0;
+}
+
+template <typename T>
+T *Vec<T>::data() noexcept {
+  return const_cast<T *>(const_cast<const Vec<T> *>(this)->data());
+}
+
+template <typename T>
+const T &Vec<T>::operator[](std::size_t n) const noexcept {
+  assert(n < this->size());
+  auto data = reinterpret_cast<const char *>(this->data());
+  return *reinterpret_cast<const T *>(data + n * size_of<T>());
+}
+
+template <typename T>
+const T &Vec<T>::at(std::size_t n) const {
+  if (n >= this->size()) {
+    panic<std::out_of_range>("rust::Vec index out of range");
+  }
+  return (*this)[n];
+}
+
+template <typename T>
+const T &Vec<T>::front() const noexcept {
+  assert(!this->empty());
+  return (*this)[0];
+}
+
+template <typename T>
+const T &Vec<T>::back() const noexcept {
+  assert(!this->empty());
+  return (*this)[this->size() - 1];
+}
+
+template <typename T>
+T &Vec<T>::operator[](std::size_t n) noexcept {
+  assert(n < this->size());
+  auto data = reinterpret_cast<char *>(this->data());
+  return *reinterpret_cast<T *>(data + n * size_of<T>());
+}
+
+template <typename T>
+T &Vec<T>::at(std::size_t n) {
+  if (n >= this->size()) {
+    panic<std::out_of_range>("rust::Vec index out of range");
+  }
+  return (*this)[n];
+}
+
+template <typename T>
+T &Vec<T>::front() noexcept {
+  assert(!this->empty());
+  return (*this)[0];
+}
+
+template <typename T>
+T &Vec<T>::back() noexcept {
+  assert(!this->empty());
+  return (*this)[this->size() - 1];
+}
+
+template <typename T>
+void Vec<T>::reserve(std::size_t new_cap) {
+  this->reserve_total(new_cap);
+}
+
+template <typename T>
+void Vec<T>::push_back(const T &value) {
+  this->emplace_back(value);
+}
+
+template <typename T>
+void Vec<T>::push_back(T &&value) {
+  this->emplace_back(std::move(value));
+}
+
+template <typename T>
+template <typename... Args>
+void Vec<T>::emplace_back(Args &&...args) {
+  auto size = this->size();
+  this->reserve_total(size + 1);
+  ::new (reinterpret_cast<T *>(reinterpret_cast<char *>(this->data()) +
+                               size * size_of<T>()))
+      T(std::forward<Args>(args)...);
+  this->set_len(size + 1);
+}
+
+template <typename T>
+void Vec<T>::clear() {
+  this->truncate(0);
+}
+
+template <typename T>
+typename Vec<T>::iterator Vec<T>::begin() noexcept {
+  return Slice<T>(this->data(), this->size()).begin();
+}
+
+template <typename T>
+typename Vec<T>::iterator Vec<T>::end() noexcept {
+  return Slice<T>(this->data(), this->size()).end();
+}
+
+template <typename T>
+typename Vec<T>::const_iterator Vec<T>::begin() const noexcept {
+  return this->cbegin();
+}
+
+template <typename T>
+typename Vec<T>::const_iterator Vec<T>::end() const noexcept {
+  return this->cend();
+}
+
+template <typename T>
+typename Vec<T>::const_iterator Vec<T>::cbegin() const noexcept {
+  return Slice<const T>(this->data(), this->size()).begin();
+}
+
+template <typename T>
+typename Vec<T>::const_iterator Vec<T>::cend() const noexcept {
+  return Slice<const T>(this->data(), this->size()).end();
+}
+
+template <typename T>
+void Vec<T>::swap(Vec &rhs) noexcept {
+  using std::swap;
+  swap(this->repr, rhs.repr);
+}
+
+template <typename T>
+Vec<T>::Vec(unsafe_bitcopy_t, const Vec &bits) noexcept : repr(bits.repr) {}
+#endif // CXXBRIDGE1_RUST_VEC
 
 #ifndef CXXBRIDGE1_RUST_OPAQUE
 #define CXXBRIDGE1_RUST_OPAQUE
@@ -244,6 +817,26 @@ std::size_t align_of() {
 }
 #endif // CXXBRIDGE1_LAYOUT
 
+namespace detail {
+template <typename T, typename = void *>
+struct operator_new {
+  void *operator()(::std::size_t sz) { return ::operator new(sz); }
+};
+
+template <typename T>
+struct operator_new<T, decltype(T::operator new(sizeof(T)))> {
+  void *operator()(::std::size_t sz) { return T::operator new(sz); }
+};
+} // namespace detail
+
+template <typename T>
+union MaybeUninit {
+  T value;
+  void *operator new(::std::size_t sz) { return detail::operator_new<T>{}(sz); }
+  MaybeUninit() {}
+  ~MaybeUninit() {}
+};
+
 namespace {
 template <typename T>
 void destroy(T *ptr) {
@@ -253,22 +846,22 @@ void destroy(T *ptr) {
 } // namespace cxxbridge1
 } // namespace rust
 
-struct PlacedSlice;
+struct UnplacedSlice;
 struct Clock;
 
-#ifndef CXXBRIDGE1_STRUCT_PlacedSlice
-#define CXXBRIDGE1_STRUCT_PlacedSlice
-// A memory buffer, annotated with
-// its lifetime and an offset.
-struct PlacedSlice final {
+#ifndef CXXBRIDGE1_STRUCT_UnplacedSlice
+#define CXXBRIDGE1_STRUCT_UnplacedSlice
+// A memory buffer in need of
+// an appropriate offset.
+struct UnplacedSlice final {
   ::std::int64_t start;
   ::std::int64_t end;
   ::std::int64_t size;
-  ::std::int64_t offset;
+  ::std::int64_t align;
 
   using IsRelocatable = ::std::true_type;
 };
-#endif // CXXBRIDGE1_STRUCT_PlacedSlice
+#endif // CXXBRIDGE1_STRUCT_UnplacedSlice
 
 #ifndef CXXBRIDGE1_STRUCT_Clock
 #define CXXBRIDGE1_STRUCT_Clock
@@ -292,7 +885,7 @@ extern "C" {
 
 void cxxbridge1$timer_end(::Clock *clk) noexcept;
 
-void cxxbridge1$print_slices(::std::vector<::PlacedSlice> const &data) noexcept;
+void cxxbridge1$place_slices(::std::vector<::UnplacedSlice> const &data, ::rust::Vec<::std::int64_t> *return$) noexcept;
 } // extern "C"
 
 ::std::size_t Clock::layout::size() noexcept {
@@ -311,8 +904,10 @@ void timer_end(::rust::Box<::Clock> clk) noexcept {
   cxxbridge1$timer_end(clk.into_raw());
 }
 
-void print_slices(::std::vector<::PlacedSlice> const &data) noexcept {
-  cxxbridge1$print_slices(data);
+::rust::Vec<::std::int64_t> place_slices(::std::vector<::UnplacedSlice> const &data) noexcept {
+  ::rust::MaybeUninit<::rust::Vec<::std::int64_t>> return$;
+  cxxbridge1$place_slices(data, &return$.value);
+  return ::std::move(return$.value);
 }
 
 extern "C" {
@@ -320,38 +915,38 @@ extern "C" {
 void cxxbridge1$box$Clock$dealloc(::Clock *) noexcept;
 void cxxbridge1$box$Clock$drop(::rust::Box<::Clock> *ptr) noexcept;
 
-::std::vector<::PlacedSlice> *cxxbridge1$std$vector$PlacedSlice$new() noexcept {
-  return new ::std::vector<::PlacedSlice>();
+::std::vector<::UnplacedSlice> *cxxbridge1$std$vector$UnplacedSlice$new() noexcept {
+  return new ::std::vector<::UnplacedSlice>();
 }
-::std::size_t cxxbridge1$std$vector$PlacedSlice$size(::std::vector<::PlacedSlice> const &s) noexcept {
+::std::size_t cxxbridge1$std$vector$UnplacedSlice$size(::std::vector<::UnplacedSlice> const &s) noexcept {
   return s.size();
 }
-::PlacedSlice *cxxbridge1$std$vector$PlacedSlice$get_unchecked(::std::vector<::PlacedSlice> *s, ::std::size_t pos) noexcept {
+::UnplacedSlice *cxxbridge1$std$vector$UnplacedSlice$get_unchecked(::std::vector<::UnplacedSlice> *s, ::std::size_t pos) noexcept {
   return &(*s)[pos];
 }
-void cxxbridge1$std$vector$PlacedSlice$push_back(::std::vector<::PlacedSlice> *v, ::PlacedSlice *value) noexcept {
+void cxxbridge1$std$vector$UnplacedSlice$push_back(::std::vector<::UnplacedSlice> *v, ::UnplacedSlice *value) noexcept {
   v->push_back(::std::move(*value));
   ::rust::destroy(value);
 }
-void cxxbridge1$std$vector$PlacedSlice$pop_back(::std::vector<::PlacedSlice> *v, ::PlacedSlice *out) noexcept {
-  ::new (out) ::PlacedSlice(::std::move(v->back()));
+void cxxbridge1$std$vector$UnplacedSlice$pop_back(::std::vector<::UnplacedSlice> *v, ::UnplacedSlice *out) noexcept {
+  ::new (out) ::UnplacedSlice(::std::move(v->back()));
   v->pop_back();
 }
-static_assert(sizeof(::std::unique_ptr<::std::vector<::PlacedSlice>>) == sizeof(void *), "");
-static_assert(alignof(::std::unique_ptr<::std::vector<::PlacedSlice>>) == alignof(void *), "");
-void cxxbridge1$unique_ptr$std$vector$PlacedSlice$null(::std::unique_ptr<::std::vector<::PlacedSlice>> *ptr) noexcept {
-  ::new (ptr) ::std::unique_ptr<::std::vector<::PlacedSlice>>();
+static_assert(sizeof(::std::unique_ptr<::std::vector<::UnplacedSlice>>) == sizeof(void *), "");
+static_assert(alignof(::std::unique_ptr<::std::vector<::UnplacedSlice>>) == alignof(void *), "");
+void cxxbridge1$unique_ptr$std$vector$UnplacedSlice$null(::std::unique_ptr<::std::vector<::UnplacedSlice>> *ptr) noexcept {
+  ::new (ptr) ::std::unique_ptr<::std::vector<::UnplacedSlice>>();
 }
-void cxxbridge1$unique_ptr$std$vector$PlacedSlice$raw(::std::unique_ptr<::std::vector<::PlacedSlice>> *ptr, ::std::vector<::PlacedSlice> *raw) noexcept {
-  ::new (ptr) ::std::unique_ptr<::std::vector<::PlacedSlice>>(raw);
+void cxxbridge1$unique_ptr$std$vector$UnplacedSlice$raw(::std::unique_ptr<::std::vector<::UnplacedSlice>> *ptr, ::std::vector<::UnplacedSlice> *raw) noexcept {
+  ::new (ptr) ::std::unique_ptr<::std::vector<::UnplacedSlice>>(raw);
 }
-::std::vector<::PlacedSlice> const *cxxbridge1$unique_ptr$std$vector$PlacedSlice$get(::std::unique_ptr<::std::vector<::PlacedSlice>> const &ptr) noexcept {
+::std::vector<::UnplacedSlice> const *cxxbridge1$unique_ptr$std$vector$UnplacedSlice$get(::std::unique_ptr<::std::vector<::UnplacedSlice>> const &ptr) noexcept {
   return ptr.get();
 }
-::std::vector<::PlacedSlice> *cxxbridge1$unique_ptr$std$vector$PlacedSlice$release(::std::unique_ptr<::std::vector<::PlacedSlice>> &ptr) noexcept {
+::std::vector<::UnplacedSlice> *cxxbridge1$unique_ptr$std$vector$UnplacedSlice$release(::std::unique_ptr<::std::vector<::UnplacedSlice>> &ptr) noexcept {
   return ptr.release();
 }
-void cxxbridge1$unique_ptr$std$vector$PlacedSlice$drop(::std::unique_ptr<::std::vector<::PlacedSlice>> *ptr) noexcept {
+void cxxbridge1$unique_ptr$std$vector$UnplacedSlice$drop(::std::unique_ptr<::std::vector<::UnplacedSlice>> *ptr) noexcept {
   ptr->~unique_ptr();
 }
 } // extern "C"

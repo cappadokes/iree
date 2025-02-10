@@ -1,0 +1,26 @@
+[package]
+name = "coreba"
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+version = "0.62.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+itertools   = { workspace = true }
+thiserror   = { workspace = true }
+rayon       = { workspace = true }
+rand        = { workspace = true }
+indexmap    = { workspace = true }
+clap        = { workspace = true }
+
+[[bin]]
+name = "idealloc"
+path = "src/bin/idealloc.rs"
+
+[[bin]]
+name = "heuristic"
+path = "src/bin/heuristic.rs"
