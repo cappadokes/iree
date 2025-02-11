@@ -19,7 +19,10 @@ on:
 
 jobs:
   test_mi300:
-    runs-on: nodai-amdgpu-mi300-x86-64
+    runs-on: linux-mi300-gpu-1
+    container:
+      image: rocm/dev-ubuntu-22.04:6.3
+      options: --user root --device=/dev/kfd --device=/dev/dri --ipc=host --group-add video --cap-add=SYS_PTRACE --security-opt seccomp=unconfined
     env:
       PACKAGE_DOWNLOAD_DIR: ${{ github.workspace }}/.packages
       BUILD_DIR: build-tests
@@ -32,13 +35,19 @@ jobs:
       IREE_HIP_ENABLE: 1
       IREE_HIP_TEST_TARGET_CHIP: "gfx942"
     steps:
+      - name: "Install dependencies"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang lld git
       - name: Check out repository
-        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: false
+      - name: "Mark git safe.directory"
+        run: git config --global --add safe.directory '*'
       - name: Check out runtime submodules
         run: ./build_tools/scripts/git/update_runtime_submodules.sh
-      - uses: actions/setup-python@f677139bbe7f9c59b41e40162b753c062f5d49a3 # v5.1.0
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
         with:
           # Must match the subset of versions built in pkgci_build_packages.
           python-version: "3.11"

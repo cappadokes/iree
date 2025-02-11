@@ -29,7 +29,7 @@ jobs:
           - name: cpu_llvm_sync
             config-file: onnx_ops_cpu_llvm_sync.json
             numprocesses: auto
-            runs-on: ubuntu-20.04
+            runs-on: ubuntu-24.04
 
           # AMD GPU
           - name: amdgpu_rocm_rdna3
@@ -69,10 +69,10 @@ jobs:
       VENV_DIR: ${{ github.workspace }}/venv
     steps:
       - name: Checking out IREE repository
-        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: false
-      - uses: actions/setup-python@f677139bbe7f9c59b41e40162b753c062f5d49a3 # v5.1.0
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
         with:
           # Must match the subset of versions built in pkgci_build_packages.
           python-version: "3.11"
@@ -87,10 +87,10 @@ jobs:
             --fetch-gh-workflow=${{ inputs.artifact_run_id }}
 
       - name: Checkout test suites repository
-        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: iree-org/iree-test-suites
-          ref: 3a0ea13cbdc954365d653a48cc99cc63a9ff09b3
+          ref: 56509666d185cdb99aafb4ed4d8532b8f3c54fa3
           path: iree-test-suites
       - name: Install ONNX ops test suite requirements
         run: |
@@ -116,7 +116,7 @@ jobs:
           cat ${CONFIG_FILE_PATH}
       - name: "Uploading new config file"
         if: failure()
-        uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 # v4.4.0
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
         with:
           name: ${{ matrix.config-file }}
           path: ${{ env.CONFIG_FILE_PATH }}
@@ -130,17 +130,32 @@ jobs:
         include:
           # CPU
           - name: cpu_llvm_task
-            runs-on: ubuntu-20.04
+            config-file: onnx_models_cpu_llvm_task.json
+            runs-on:
+              - self-hosted # must come first
+              - persistent-cache
+              - Linux
+              - X64
 
-          # TODO(scotttodd): test other backends (parameterize the test suite)
+          # AMD GPU
+          - name: amdgpu_rocm_rdna3
+            config-file: onnx_models_gpu_rocm_rdna3.json
+            runs-on: nodai-amdgpu-w7900-x86-64
+          - name: amdgpu_vulkan
+            config-file: onnx_models_gpu_vulkan.json
+            runs-on: nodai-amdgpu-w7900-x86-64
+
+          # NVIDIA GPU
+          # TODO(#18238): migrate to new runner cluster
     env:
       VENV_DIR: ${{ github.workspace }}/venv
+      CONFIG_FILE_PATH: tests/external/iree-test-suites/onnx_models/${{ matrix.config-file }}
     steps:
       - name: Checking out IREE repository
-        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: false
-      - uses: actions/setup-python@f677139bbe7f9c59b41e40162b753c062f5d49a3 # v5.1.0
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
         with:
           # Must match the subset of versions built in pkgci_build_packages.
           python-version: "3.11"
@@ -155,10 +170,10 @@ jobs:
             --fetch-gh-workflow=${{ inputs.artifact_run_id }}
 
       - name: Checkout test suites repository
-        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: iree-org/iree-test-suites
-          ref: 3a0ea13cbdc954365d653a48cc99cc63a9ff09b3
+          ref: 56509666d185cdb99aafb4ed4d8532b8f3c54fa3
           path: iree-test-suites
       - name: Install ONNX models test suite requirements
         run: |
@@ -170,6 +185,6 @@ jobs:
           pytest iree-test-suites/onnx_models/ \
               -rA \
               --log-cli-level=info \
-              --override-ini=xfail_strict=false \
               --timeout=120 \
-              --durations=0
+              --durations=0 \
+              --test-config-file=${CONFIG_FILE_PATH}

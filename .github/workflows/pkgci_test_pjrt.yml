@@ -4,7 +4,7 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-name: PkgCI Test AMD W7900
+name: PkgCI Test PJRT plugin
 on:
   workflow_call:
     inputs:
@@ -18,24 +18,30 @@ on:
         default: ""
 
 jobs:
-  test_w7900:
-    runs-on: nodai-amdgpu-w7900-x86-64
+  build_and_test:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            pjrt_platform: cpu
+        # TODO: cuda runner is not available yet, refer to #18814
+        #   - runner: some-cuda-available-runner
+        #     pjrt_platform: cuda
+        # TODO: enable these AMD runners
+        #   - runner: nodai-amdgpu-w7900-x86-64
+        #     pjrt_platform: rocm
+        #   - runner: nodai-amdgpu-w7900-x86-64
+        #     pjrt_platform: vulkan
+    name: Build and test
+    runs-on: ${{ matrix.runner }}
     env:
       PACKAGE_DOWNLOAD_DIR: ${{ github.workspace }}/.packages
-      BUILD_DIR: build-tests
       VENV_DIR: ${{ github.workspace }}/.venv
-      IREE_CPU_DISABLE: 1
-      IREE_VULKAN_DISABLE: 0
-      IREE_CUDA_ENABLE: 0
-      IREE_HIP_ENABLE: 1
-      IREE_HIP_TEST_TARGET_CHIP: "gfx1100"
     steps:
-      - name: Check out repository
+      - name: Checking out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          submodules: false
-      - name: Check out runtime submodules
-        run: ./build_tools/scripts/git/update_runtime_submodules.sh
+          submodules: true
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
         with:
           # Must match the subset of versions built in pkgci_build_packages.
@@ -49,15 +55,14 @@ jobs:
           ./build_tools/pkgci/setup_venv.py ${VENV_DIR} \
             --artifact-path=${PACKAGE_DOWNLOAD_DIR} \
             --fetch-gh-workflow=${{ inputs.artifact_run_id }}
-
-      - name: Build tests
-        run: ./build_tools/pkgci/build_tests_using_package.sh ${VENV_DIR}/bin
-      - name: Run GPU tests
-        env:
-          CTEST_PARALLEL_LEVEL: 1
-          IREE_CTEST_LABEL_REGEX: ^requires-gpu|^driver=vulkan$|^driver=hip$
-          IREE_AMD_RDNA3_TESTS_DISABLE: 0
-          IREE_NVIDIA_GPU_TESTS_DISABLE: 0
-          IREE_NVIDIA_SM80_TESTS_DISABLE: 1
-          IREE_MULTI_DEVICE_TESTS_DISABLE: 0
-        run: ./build_tools/cmake/ctest_all.sh ${BUILD_DIR}
+      - name: Build and install
+        run: |
+          # install editable into venv
+          source ${VENV_DIR}/bin/activate
+          python -m pip install -v --no-deps -e integrations/pjrt/python_packages/iree_${{ matrix.pjrt_platform }}_plugin
+          # install
+          python -m pip install jax==0.4.36
+      - name: Run tests
+        run: |
+          source ${VENV_DIR}/bin/activate
+          build_tools/testing/run_jax_tests.sh ${{ matrix.pjrt_platform }}
