@@ -14,14 +14,12 @@ iree_lit_test_suite(
   NAME
     lit
   SRCS
-    "amdgpu_chained_matmul.mlir"
-    "amdgpu_contraction_distribution.mlir"
-    "amdgpu_set_anchor_layouts.mlir"
     "assign_constant_ordinals.mlir"
     "cast_address_space_function.mlir"
     "cast_type_to_fit_mma.mlir"
     "config_custom_op.mlir"
     "config_matvec.mlir"
+    "config_root_op_attribute.mlir"
     "config_winograd.mlir"
     "configure_tensor_layout.mlir"
     "conv_pipeline_test_cuda.mlir"
@@ -49,6 +47,7 @@ iree_lit_test_suite(
     "reduction_pipeline_cuda.mlir"
     "reduction_pipeline_rocm.mlir"
     "reduction_pipeline_softmax_rocm.mlir"
+    "reuse_shared_memory_allocs.mlir"
     "rocdl_pipeline_test.mlir"
     "tensor_pad.mlir"
     "tensorcore_vectorization.mlir"
@@ -64,7 +63,6 @@ iree_lit_test_suite(
     "transform_gpu_pipelining.mlir"
     "transform_vector_to_mma.mlir"
     "transpose_pipeline_test.mlir"
-    "ukernel_pipeline_transform.mlir"
     "vector_lowering.mlir"
     "vector_to_gpu.mlir"
     "winograd_pipeline_test.mlir"

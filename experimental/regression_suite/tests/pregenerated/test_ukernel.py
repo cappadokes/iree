@@ -6,6 +6,7 @@
 
 import pytest
 from ireers_tools import *
+from pathlib import Path
 
 ###############################################################################
 # Fixtures
@@ -25,7 +26,7 @@ argmax_ukernel_source = fetch_source_fixture(
 def argmax_ukernel_host_cpu_vmfb(argmax_ukernel_source):
     return iree_compile(
         argmax_ukernel_source,
-        "host_cpu",
+        vmfb_path=Path("host_cpu"),
         flags=COMMON_FLAGS
         + [
             "--iree-hal-target-backends=llvm-cpu",
@@ -38,7 +39,7 @@ def argmax_ukernel_host_cpu_vmfb(argmax_ukernel_source):
 def argmax_ukernel_gfx90a_rocm_vmfb(argmax_ukernel_source):
     return iree_compile(
         argmax_ukernel_source,
-        "gfx90a_rocm",
+        vmfb_path=Path("gfx90a_rocm"),
         flags=COMMON_FLAGS
         + [
             "--iree-hal-target-backends=rocm",
@@ -49,14 +50,14 @@ def argmax_ukernel_gfx90a_rocm_vmfb(argmax_ukernel_source):
 
 
 @pytest.fixture
-def argmax_ukernel_gfx940_rocm_vmfb(argmax_ukernel_source):
+def argmax_ukernel_gfx942_rocm_vmfb(argmax_ukernel_source):
     return iree_compile(
         argmax_ukernel_source,
-        "gfx940_rocm",
+        vmfb_path=Path("gfx942_rocm"),
         flags=COMMON_FLAGS
         + [
             "--iree-hal-target-backends=rocm",
-            "--iree-hip-target=gfx940",
+            "--iree-hip-target=gfx942",
             "--iree-hip-enable-ukernels=argmax",
         ],
     )
@@ -195,16 +196,16 @@ def test_correctness_gfx90a_rocm(
 
 @pytest.mark.presubmit
 @pytest.mark.unstable_linalg
-@pytest.mark.plat_gfx940_rocm
-def test_correctness_gfx940_rocm(
-    argmax_ukernel_gfx940_rocm_vmfb,
+@pytest.mark.plat_gfx942_rocm
+def test_correctness_gfx942_rocm(
+    argmax_ukernel_gfx942_rocm_vmfb,
     argmax_input_f16,
     argmax_output_f16,
     argmax_input_f32,
     argmax_output_f32,
 ):
     iree_run_module(
-        argmax_ukernel_gfx940_rocm_vmfb,
+        argmax_ukernel_gfx942_rocm_vmfb,
         device="hip",
         function="argmax_3d_dyn_f16i32",
         args=[
@@ -213,7 +214,7 @@ def test_correctness_gfx940_rocm(
         ],
     )
     iree_run_module(
-        argmax_ukernel_gfx940_rocm_vmfb,
+        argmax_ukernel_gfx942_rocm_vmfb,
         device="hip",
         function="argmax_3d_dyn_f16i64",
         args=[
@@ -223,7 +224,7 @@ def test_correctness_gfx940_rocm(
     )
 
     iree_run_module(
-        argmax_ukernel_gfx940_rocm_vmfb,
+        argmax_ukernel_gfx942_rocm_vmfb,
         device="hip",
         function="argmax_3d_dyn_f32i32",
         args=[
@@ -232,7 +233,7 @@ def test_correctness_gfx940_rocm(
         ],
     )
     iree_run_module(
-        argmax_ukernel_gfx940_rocm_vmfb,
+        argmax_ukernel_gfx942_rocm_vmfb,
         device="hip",
         function="argmax_3d_dyn_f32i64",
         args=[

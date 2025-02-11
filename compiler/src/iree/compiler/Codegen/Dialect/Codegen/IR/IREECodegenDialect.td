@@ -23,7 +23,7 @@ def IREECodegen_Dialect : Dialect {
   let description = [{
     This dialect is primarily meant to hold attributes that carry the
     state of the compilation when lowered to scalar code for an
-    architecture. Typically, a backend starts by analysing the entry
+    architecture. Typically, a backend starts by analyzing the entry
     point functions within the `hal.executable.variant` and deciding
     which compilation pipeline to chose. During this, even the values
     for parameters such as tile sizes, etc. are also decided. The rest
@@ -36,8 +36,23 @@ def IREECodegen_Dialect : Dialect {
   let extraClassDeclaration = [{
     void initializeCodegenAttrs();
 
+    /// Returns the loaded module for the `libraryPath` transform dialect
+    /// library MLIR input. If the module has already been loaded in the
+    /// past, returns the memoized module without parsing the file again.
+    /// This function is thead-safe.
     FailureOr<::mlir::ModuleOp>
-    getOrLoadTransformLibraryModule(std::string libraryPath);
+    getOrLoadTransformLibraryModule(StringRef libraryPath);
+
+    /// Returns the parsed module for the `libraryPath` transform dialect
+    /// library MLIR input `libraryMLIRSource`. If the module has already
+    /// been parsed in the past, returns the memoized module without parsing
+    /// the source again. Note that this function does not access
+    /// `libraryPath` and only uses it as the key associated with the
+    /// matching parsed module.
+    /// This function is thead-safe.
+    FailureOr<::mlir::ModuleOp>
+    getOrParseTransformLibraryModule(StringRef libraryPath,
+                                     StringRef libraryMLIRSource);
 
     private:
 
@@ -52,7 +67,9 @@ def IREECodegen_Dialect : Dialect {
     /// the module once and can reuse it across all invocations.
     std::mutex libraryMutex;
   }];
+  let useDefaultTypePrinterParser = 1;
   let useDefaultAttributePrinterParser = 1;
+  let hasOperationAttrVerify = 1;
 }
 
 def AnyRankedTensorOrMemRefType : AnyTypeOf<[AnyRankedTensor, AnyMemRef]>;

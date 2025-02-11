@@ -8,6 +8,9 @@
 
 #include <cstdint>
 
+#include "compiler/plugins/target/ROCM/builtins/tuning/iree_default_tuning_specs_amdgpu.h"
+#include "compiler/plugins/target/ROCM/builtins/ukernel/iree_uk_amdgpu_bitcode.h"
+#include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenDialect.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUDialect.h"
@@ -21,6 +24,7 @@
 #include "iree/compiler/Dialect/HAL/Utils/ExecutableDebugInfoUtils.h"
 #include "iree/compiler/Dialect/HAL/Utils/LLVMLinkerUtils.h"
 #include "iree/compiler/PluginAPI/Client.h"
+#include "iree/compiler/Utils/EmbeddedDataDirectory.h"
 #include "iree/compiler/Utils/FlatbufferUtils.h"
 #include "iree/compiler/Utils/ToolUtils.h"
 #include "iree/schemas/amdgpu_executable_def_builder.h"
@@ -56,14 +60,13 @@ namespace mlir::iree_compiler::IREE::HAL {
 namespace {
 
 // TODO(#18792): rename flags back to iree-rocm- as they are not HIP-specific.
-// Only iree-hip-legacy-sync applies uniquely to HIP.
 struct ROCMOptions {
   std::string target = "";
   std::string targetFeatures = "";
   std::string bitcodeDirectory = getDefaultBitcodeDirectory();
   int wavesPerEu = 0;
   std::string enableROCMUkernels = "none";
-  bool legacySync = true;
+  bool experimentalPadLayout = false;
   bool slpVectorization = true;
   bool globalISel = false;
 
@@ -103,9 +106,11 @@ struct ROCMOptions {
         cl::desc("Enables microkernels in the HIP compiler backend. May be "
                  "`default`, `none`, `all`, or a comma-separated list of "
                  "specific unprefixed microkernels to enable, e.g. `mmt4d`."));
-    binder.opt<bool>("iree-hip-legacy-sync", legacySync, cl::cat(category),
-                     cl::desc("Enables 'legacy-sync' mode, which is required "
-                              "for inline execution."));
+    binder.opt<bool>("iree-hip-enable-experimental-pad-layout",
+                     experimentalPadLayout, cl::cat(category),
+                     cl::desc("Enables additional padding on allocations to "
+                              "maximize cache bandwidth."));
+
     binder.list<std::string>(
         "iree-hip-pass-plugin-path", passPlugins,
         cl::desc("LLVM pass plugins are out of tree libraries that implement "
@@ -171,9 +176,10 @@ static StringRef getABI(IREE::HAL::ExecutableTargetAttr targetAttr) {
 
 static void dumpModuleToPath(StringRef path, StringRef baseName,
                              StringRef suffix, StringRef extension,
-                             llvm::Module &module) {
+                             llvm::Module &module, StringRef header = {}) {
   llvm::SmallVector<char, 0> data;
   llvm::raw_svector_ostream ostream(data);
+  ostream << header;
   module.print(ostream, nullptr);
   dumpDataToPath(path, baseName, suffix, extension,
                  StringRef(data.data(), data.size()));
@@ -206,6 +212,7 @@ static std::string translateModuleToISA(llvm::Module &module,
   }
   return targetISA;
 }
+
 } // namespace
 
 class ROCMTargetBackend final : public TargetBackend {
@@ -226,9 +233,9 @@ public:
   IREE::HAL::ExecutableTargetAttr
   getExecutableTarget(StringRef deviceID, MLIRContext *context) const {
     Builder b(context);
-    SmallVector<NamedAttribute> configItems;
+    SmallVector<NamedAttribute, 4> configItems;
     auto addConfig = [&](StringRef name, Attribute value) {
-      configItems.emplace_back(b.getStringAttr(name), value);
+      configItems.emplace_back(name, value);
     };
 
     if (failed(options.verify(b))) {
@@ -246,6 +253,11 @@ public:
     if (auto target = GPU::getHIPTargetDetails(
             options.target, options.targetFeatures, context)) {
       addConfig("iree.gpu.target", target);
+      if (options.experimentalPadLayout) {
+        if (Attribute encoding = GPU::getHIPTargetEncodingLayoutAttr(target)) {
+          addConfig("encoding", encoding);
+        }
+      }
     }
 
     addConfig("ukernels", b.getStringAttr(options.enableROCMUkernels));
@@ -265,6 +277,8 @@ public:
     registry.insert<IREE::Codegen::IREECodegenDialect>();
     registry.insert<IREE::VectorExt::IREEVectorExtDialect>();
     registry.insert<IREE::GPU::IREEGPUDialect>();
+    // Configuration may load and manipulate transform dialect libraries.
+    registerTransformDialectTranslationDependentDialects(registry);
   }
 
   void
@@ -288,7 +302,8 @@ public:
   static void optimizeModule(llvm::Module &module,
                              llvm::TargetMachine &targetMachine,
                              ArrayRef<std::string> passPlugins,
-                             bool slpVectorization) {
+                             bool slpVectorization,
+                             std::string &outPassesString) {
     llvm::LoopAnalysisManager lam;
     llvm::FunctionAnalysisManager fam;
     llvm::CGSCCAnalysisManager cgam;
@@ -329,7 +344,11 @@ public:
     mpm.addPass(llvm::VerifierPass());
     mpm.addPass(pb.buildPerModuleDefaultPipeline(ol));
     mpm.addPass(llvm::VerifierPass());
-
+    llvm::raw_string_ostream os(outPassesString);
+    mpm.printPipeline(os, [&pic](StringRef className) {
+      auto passName = pic.getPassNameForClassName(className);
+      return passName.empty() ? className : passName;
+    });
     mpm.run(module, mam);
   }
 
@@ -342,7 +361,7 @@ public:
         return variantOp.emitError()
                << "found an unresolved external function '" << func.getName()
                << "' in the final bitcode. A remaining live user is\n"
-               << llvm::formatv("{0}", *liveUser);
+               << llvm::formatv("{}", *liveUser);
       }
     }
     return success();
@@ -462,7 +481,20 @@ public:
         opt.UnsafeFPMath = false;
         opt.NoInfsFPMath = false;
         opt.NoNaNsFPMath = true;
+        // Be extra cautious while this is less tested, and prevent unknown
+        // fallbacks from global isel.
+        //
+        // When GlobalISelAbort is set, any failure of GlobalISel,
+        // whether due to being not yet implemented or incorrect IR will result
+        // in an immediate abortion of compilation. This disables the fallback
+        // path of AMDGPUPassConfig::addInstSelector and 2 legacy passes which
+        // might work around unimplemented cases or errors in GlobalISel
+        // resulting in a successful compilation but would make one assume
+        // results are with GlobalISel when they are not.
         opt.EnableGlobalISel = options.globalISel;
+        opt.GlobalISelAbort = options.globalISel
+                                  ? llvm::GlobalISelAbortMode::Enable
+                                  : llvm::GlobalISelAbortMode::Disable;
         SmallVector<std::string> features;
         if (targetArch.starts_with("gfx10") ||
             targetArch.starts_with("gfx11")) {
@@ -513,29 +545,36 @@ public:
         return failure();
       }
 
-      // Link module to any enabled ukernels.
-      StringRef bitcodeDirectory = options.bitcodeDirectory;
-      StringRef enabledUkernels;
-      if (auto attr = getConfigStringAttr(targetAttr, "ukernels"))
-        enabledUkernels = attr->getValue();
-      if (!enabledUkernels.empty() && enabledUkernels != "none") {
-        if (failed(linkUkernelBitcodeFiles(
-                variantOp.getLoc(), llvmModule.get(), enabledUkernels,
-                targetArch, bitcodeDirectory, llvm::Linker::OverrideFromSrc,
-                *targetMachine))) {
-          return failure();
-        }
+      // Link bitcode (*.bc) object attrs specified by the input program.
+      // Note that this happens after the command-line files so that the command
+      // line ones override the symbols coming from the embedded files.
+      auto specializationCallback = [&](llvm::Module &userModule) {
+        // TODO: inject __nvvm_reflect-style functions/globals for
+        // bitcode specialization based on the targetMachine and configuration.
+        // These could use any information we have on the IREE side as well as
+        // the TargetMachine.
+      };
+      unsigned linkerFlags =
+          llvm::Linker::LinkOnlyNeeded | llvm::Linker::OverrideFromSrc;
+      if (failed(linkBitcodeObjects(variantOp.getLoc(), linker, linkerFlags,
+                                    *targetMachine, variantOp.getObjectsAttr(),
+                                    llvmModule->getContext(),
+                                    specializationCallback))) {
+        return mlir::emitError(variantOp.getLoc())
+               << "failed linking in user objects for target triple '"
+               << targetArch.str() << "'";
       }
 
       // Link module to HIP device library.
-      if (bitcodeDirectory.empty()) {
+      if (options.bitcodeDirectory.empty()) {
         return variantOp.emitError()
                << "cannot find ROCM bitcode files. Check your installation "
                   "consistency and in the worst case, set "
                   "--iree-hip-bc-dir= to a path on your system.";
       }
       if (failed(linkHIPBitcodeIfNeeded(variantOp.getLoc(), llvmModule.get(),
-                                        targetArch, bitcodeDirectory))) {
+                                        targetArch,
+                                        options.bitcodeDirectory))) {
         return failure();
       }
 
@@ -552,12 +591,19 @@ public:
       }
 
       // Run LLVM optimization passes.
+      std::string passesString;
       optimizeModule(*llvmModule, *targetMachine, options.passPlugins,
-                     options.slpVectorization);
+                     options.slpVectorization, passesString);
       if (!serializationOptions.dumpIntermediatesPath.empty()) {
+        std::string header = llvm::formatv(R"TXT(
+; To reproduce the .optimized.ll from the .linked.ll, run:
+; opt --passes='{}'
+
+)TXT",
+                                           passesString);
         dumpModuleToPath(serializationOptions.dumpIntermediatesPath,
                          serializationOptions.dumpBaseName, variantOp.getName(),
-                         ".optimized.ll", *llvmModule);
+                         ".optimized.ll", *llvmModule, header);
       }
 
       if (failed(validateFinalizedModule(variantOp, *llvmModule))) {
@@ -651,7 +697,9 @@ protected:
       }
       int64_t ordinal = ordinalAttr.getInt();
 
-      auto symbolNameRef = builder.createString(exportOp.getName());
+      // Symbol names include a `.kd` suffix as that's what HSA expects.
+      auto symbolNameKd = (exportOp.getName() + ".kd").str();
+      auto symbolNameRef = builder.createString(symbolNameKd);
 
       iree_hal_amdgpu_Dims_t workgroupSize = {0};
       if (auto workgroupSizeAttr = exportOp.getWorkgroupSize()) {
@@ -802,12 +850,8 @@ public:
   getDefaultDeviceTarget(MLIRContext *context,
                          const TargetRegistry &targetRegistry) const override {
     Builder b(context);
-
-    SmallVector<NamedAttribute> deviceConfigAttrs;
-    auto deviceConfigAttr = b.getDictionaryAttr(deviceConfigAttrs);
-
-    SmallVector<NamedAttribute> executableConfigAttrs;
-    auto executableConfigAttr = b.getDictionaryAttr(executableConfigAttrs);
+    auto deviceConfigAttr = b.getDictionaryAttr({});
+    auto executableConfigAttr = b.getDictionaryAttr({});
 
     // If we had multiple target environments we would generate one target attr
     // per environment, with each setting its own environment attribute.
@@ -832,18 +876,8 @@ public:
   getDefaultDeviceTarget(MLIRContext *context,
                          const TargetRegistry &targetRegistry) const override {
     Builder b(context);
-
-    SmallVector<NamedAttribute> deviceConfigAttrs;
-    if (options.legacySync) {
-      // Indicates that the runtime HAL driver operates only in the legacy
-      // synchronous mode.
-      deviceConfigAttrs.emplace_back(b.getStringAttr("legacy_sync"),
-                                     b.getUnitAttr());
-    }
-    auto deviceConfigAttr = b.getDictionaryAttr(deviceConfigAttrs);
-
-    SmallVector<NamedAttribute> executableConfigAttrs;
-    auto executableConfigAttr = b.getDictionaryAttr(executableConfigAttrs);
+    auto deviceConfigAttr = b.getDictionaryAttr({});
+    auto executableConfigAttr = b.getDictionaryAttr({});
 
     // If we had multiple target environments we would generate one target attr
     // per environment, with each setting its own environment attribute.
@@ -861,6 +895,7 @@ private:
 };
 
 namespace {
+
 struct ROCMSession final
     : PluginSession<ROCMSession, ROCMOptions,
                     PluginActivationPolicy::DefaultActivated> {
@@ -886,6 +921,29 @@ struct ROCMSession final
   }
 };
 
+// Iterate over ukernel bitcode embedded-data files, and insert them into the
+// EmbeddedDataDirectory singleton.
+static void addAMDGPUUkernelBitcodeToGlobalEmbeddedDataDirectory() {
+  EmbeddedDataDirectory::withGlobal([](EmbeddedDataDirectory &dir) {
+    const iree_file_toc_t *toc = iree_uk_amdgpu_bitcode_create();
+    for (size_t i = 0; i < iree_uk_amdgpu_bitcode_size(); ++i) {
+      dir.addFile(toc[i].name, llvm::StringRef{toc[i].data, toc[i].size});
+    }
+  });
+}
+
+// Iterate over default tuning spec embedded-data files, and insert them into
+// the EmbeddedDataDirectory singleton.
+static void addAMDGPUDefaultTuningSpecsToGlobalEmbeddedDataDirectory() {
+  EmbeddedDataDirectory::withGlobal([](EmbeddedDataDirectory &dir) {
+    const iree_file_toc_t *toc = iree_default_tuning_specs_amdgpu_create();
+    for (size_t i = 0, e = iree_default_tuning_specs_amdgpu_size(); i != e;
+         ++i) {
+      dir.addFile(toc[i].name, llvm::StringRef{toc[i].data, toc[i].size});
+    }
+  });
+}
+
 } // namespace
 
 } // namespace mlir::iree_compiler::IREE::HAL
@@ -894,6 +952,10 @@ extern "C" bool iree_register_compiler_plugin_hal_target_rocm(
     mlir::iree_compiler::PluginRegistrar *registrar) {
   registrar->registerPlugin<mlir::iree_compiler::IREE::HAL::ROCMSession>(
       "hal_target_rocm");
+  mlir::iree_compiler::IREE::HAL::
+      addAMDGPUUkernelBitcodeToGlobalEmbeddedDataDirectory();
+  mlir::iree_compiler::IREE::HAL::
+      addAMDGPUDefaultTuningSpecsToGlobalEmbeddedDataDirectory();
   return true;
 }
 

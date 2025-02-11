@@ -83,20 +83,14 @@ hal.executable @dot_dispatch_0 {
   }
 }
 
-//     CHECK-LABEL: hal.executable public @dot_dispatch_0
-//           CHECK:   hal.executable.variant public @cuda
-//       CHECK-NOT:   llvm.store
-//   CHECK-COUNT-3:   llvm.load {{.*}} : !llvm.ptr<1> -> vector<4xf32>
-//           CHECK:   llvm.br
-//   CHECK-COUNT-3:   llvm.store {{.*}} : vector<4xf32>, !llvm.ptr<3>
-//  CHECK-COUNT-32:   llvm.load {{.*}} : !llvm.ptr<3> -> vector<4xf32>
-// CHECK-COUNT-128:   llvm.intr.fmuladd({{.*}}) : (vector<4xf32>, vector<4xf32>, vector<4xf32>) -> vector<4xf32>
-//   CHECK-COUNT-3:   llvm.load {{.*}} : !llvm.ptr<1> -> vector<4xf32>
-//           CHECK:   llvm.br
-//   CHECK-COUNT-3:   llvm.store {{.*}} : vector<4xf32>, !llvm.ptr<3>
-//  CHECK-COUNT-32:   llvm.load {{.*}} : !llvm.ptr<3> -> vector<4xf32>
-// CHECK-COUNT-128:   llvm.intr.fmuladd({{.*}}) : (vector<4xf32>, vector<4xf32>, vector<4xf32>) -> vector<4xf32>
-//   CHECK-COUNT-4:   llvm.store {{.*}} : vector<4xf32>, !llvm.ptr<1>
+//      CHECK-LABEL: hal.executable public @dot_dispatch_0
+//            CHECK:   hal.executable.variant public @cuda
+//        CHECK-NOT:   llvm.store
+//            CHECK:   llvm.br
+//            CHECK:    llvm.load {{.*}} : !llvm.ptr<1> -> vector<32xf32>
+//   CHECK-COUNT-32:    llvm.load {{.*}} : !llvm.ptr<1> -> vector<16xf32>
+//   CHECK-COUNT-32:    llvm.intr.fmuladd({{.*}}) : (vector<16xf32>, vector<16xf32>, vector<16xf32>) -> vector<16xf32>
+//            CHECK:    llvm.store {{.*}} : vector<16xf32>, !llvm.ptr<1>
 
 // -----
 
@@ -158,11 +152,10 @@ hal.executable @dot_dispatch_0 {
 }
 
 //   CHECK-LABEL: hal.executable public @dot_dispatch_0
-//         CHECK:   hal.executable.variant public @cuda
-//         CHECK:   llvm.br
-// CHECK-COUNT-8:   llvm.intr.fmuladd({{.*}}) : (vector<4xf32>, vector<4xf32>, vector<4xf32>) -> vector<4xf32>
-//         CHECK:   llvm.br
-// CHECK-COUNT-2:   llvm.store {{.*}} : vector<4xf32>, !llvm.ptr<1>
+//            CHECK:   hal.executable.variant public @cuda
+//            CHECK:  llvm.br
+//   CHECK-COUNT-32:    llvm.intr.fmuladd({{.*}}) : (vector<16xf32>, vector<16xf32>, vector<16xf32>) -> vector<16xf32>
+//            CHECK:    llvm.store {{.*}} : vector<16xf32>, !llvm.ptr<1>
 
 // -----
 
@@ -458,18 +451,11 @@ hal.executable @mma_fused {
 //           SM80:   nvvm.cp.async.wait.group 3
 //   SM80-COUNT-4:   nvvm.wmma.load{{.*}} : (!llvm.ptr<3>) -> !llvm.struct<(i32, i32, i32, i32)
 //   SM80-COUNT-2:   nvvm.wmma.mma
-//   SM80-COUNT-2:   llvm.inline_asm has_side_effects asm_dialect = att "cp.async.cg.shared.global [$0], [$1], $2, $3;\0A", "r,l,n,r" {{.*}}, {{.*}}, {{.*}}, {{.*}} : (!llvm.ptr<3>, !llvm.ptr<1>, i32, i32) -> ()
+//   SM80-COUNT-2:   nvvm.cp.async.shared.global %{{.*}}, %{{.*}}, 16, cache = cg, %{{.*}} : !llvm.ptr<3>, !llvm.ptr<1>, i32
 //           SM80:   nvvm.cp.async.commit.group
 //           SM80:   llvm.br
 //       SM80-NOT:   nvvm.wmma.mma
-//   SM80-COUNT-1:   nvvm.wmma.store {{.*}} : !llvm.ptr<3>, f32, f32, f32, f32, f32, f32, f32, f32
-//           SM80:   vvm.barrier0
-//           SM80:   llvm.load {{.*}} : !llvm.ptr<3> -> vector<4xf32>
-//           SM80:   llvm.fadd {{.*}} : vector<4xf32>
-//           SM80:   llvm.store {{.*}} : vector<4xf32>, !llvm.ptr<1>
-//           SM80:   llvm.load {{.*}} : !llvm.ptr<3> -> vector<4xf32>
-//           SM80:   llvm.fadd {{.*}} : vector<4xf32>
-//           SM80:   llvm.store {{.*}} : vector<4xf32>, !llvm.ptr<1>
+//   SM80-COUNT-1:   nvvm.wmma.store {{.*}} : !llvm.ptr<1>, f32, f32, f32, f32, f32, f32, f32, f32
 
 
 
@@ -543,16 +529,11 @@ hal.executable @mma_fused_fp16 {
 //           SM80:   nvvm.cp.async.wait.group 3
 //   SM80-COUNT-2:   nvvm.wmma.load{{.*}} : (!llvm.ptr<3>) -> !llvm.struct<(vector<2xf16>, vector<2xf16>, vector<2xf16>, vector<2xf16>, vector<2xf16>, vector<2xf16>, vector<2xf16>, vector<2xf16>)
 //   SM80-COUNT-1:   nvvm.wmma.mma
-//   SM80-COUNT-2:   llvm.inline_asm has_side_effects asm_dialect = att "cp.async.cg.shared.global [$0], [$1], $2, $3;\0A", "r,l,n,r" {{.*}}, {{.*}}, {{.*}}, {{.*}} : (!llvm.ptr<3>, !llvm.ptr<1>, i32, i32) -> ()
+//   SM80-COUNT-2:   nvvm.cp.async.shared.global %{{.*}}, %{{.*}}, 16, cache = cg, %{{.*}} : !llvm.ptr<3>, !llvm.ptr<1>, i32
 //           SM80:   nvvm.cp.async.commit.group
 //           SM80:   llvm.br
 //       SM80-NOT:   nvvm.wmma.mma
-//   SM80-COUNT-1:   nvvm.wmma.store {{.*}} : !llvm.ptr<3>, vector<2xf16>, vector<2xf16>, vector<2xf16>, vector<2xf16>
-//           SM80:   vvm.barrier0
-//           SM80:   llvm.load {{.*}} : !llvm.ptr<3> -> vector<8xf16>
-//           SM80:   llvm.fadd {{.*}} : vector<8xf16>
-//           SM80:   llvm.store {{.*}} : vector<8xf16>, !llvm.ptr<1>
-//           SM80:   vvm.barrier0
+//   SM80-COUNT-1:   nvvm.wmma.store {{.*}} : !llvm.ptr<1>, vector<2xf16>, vector<2xf16>, vector<2xf16>, vector<2xf16>
 
 // -----
 
@@ -621,7 +602,7 @@ hal.executable @mma_fused_fp16 {
 //           SM80:   nvvm.cp.async.wait.group 3
 //   SM80-COUNT-4:   nvvm.wmma.load{{.*}} : (!llvm.ptr<3>) -> !llvm.struct<(i32, i32, i32, i32)
 //   SM80-COUNT-2:   nvvm.wmma.mma
-//   SM80-COUNT-2:   llvm.inline_asm has_side_effects asm_dialect = att "cp.async.cg.shared.global [$0], [$1], $2, $3;\0A", "r,l,n,r" {{.*}}, {{.*}}, {{.*}}, {{.*}} : (!llvm.ptr<3>, !llvm.ptr<1>, i32, i32) -> ()
+//   SM80-COUNT-2:   nvvm.cp.async.shared.global %{{.*}}, %{{.*}}, 16, cache = cg, %{{.*}} : !llvm.ptr<3>, !llvm.ptr<1>, i32
 //           SM80:   nvvm.cp.async.commit.group
 //           SM80:   llvm.br
 //       SM80-NOT:   nvvm.wmma.mma
@@ -689,7 +670,7 @@ hal.executable @mma_fused_fp16 {
 //           SM80:   nvvm.cp.async.wait.group 3
 //   SM80-COUNT-4:   nvvm.wmma.load{{.*}} : (!llvm.ptr<3>) -> !llvm.struct<(i32, i32, i32, i32)
 //   SM80-COUNT-2:   nvvm.wmma.mma
-//           SM80:   llvm.inline_asm has_side_effects asm_dialect = att "cp.async.cg.shared.global [$0], [$1], $2, $3;\0A", "r,l,n,r" {{.*}}, {{.*}}, {{.*}}, {{.*}} : (!llvm.ptr<3>, !llvm.ptr<1>, i32, i32) -> ()
+//           SM80:   nvvm.cp.async.shared.global %{{.*}}, %{{.*}}, 16, cache = cg, %{{.*}} : !llvm.ptr<3>, !llvm.ptr<1>, i32
 //           SM80:   nvvm.cp.async.commit.group
 //           SM80:   llvm.br
 //       SM80-NOT:   nvvm.wmma.mma

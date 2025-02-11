@@ -11,6 +11,8 @@
 #include "iree/compiler/Codegen/Common/GPU/GPUVectorDistribution.h"
 #include "iree/compiler/Codegen/Common/GPU/Passes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/Utils/Utils.h"
+#include "iree/compiler/Codegen/Dialect/GPU/IR/GPUTileSwizzleUtils.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUInterfaces.h"
 #include "iree/compiler/Codegen/LLVMGPU/Utils/LLVMGPUUtils.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
@@ -54,6 +56,7 @@ using llvm::dbgs;
 using namespace mlir;
 using namespace mlir::iree_compiler;
 using namespace mlir::iree_compiler::IREE;
+using mlir::iree_compiler::IREE::Codegen::TileSwizzle;
 
 iree_compiler::IREE::transform_dialect::LLVMGPUExtensions::LLVMGPUExtensions() {
   // CreateAsyncGroupsOp depends on the following two dialects.
@@ -150,7 +153,7 @@ void transform_dialect::VectorToWarpExecuteOnLane0Op::build(
 // SCCP.
 static LogicalResult
 replaceAllUsesOfLaneWithin(RewriterBase &b,
-                           vector::WarpExecuteOnLane0Op executeOp) {
+                           gpu::WarpExecuteOnLane0Op executeOp) {
   OpBuilder::InsertionGuard g(b);
   b.setInsertionPoint(executeOp);
   Value zero = b.create<arith::ConstantIndexOp>(executeOp.getLoc(), 0);
@@ -222,7 +225,7 @@ static FailureOr<gpu::ThreadIdOp> isThreadIdxxZeroPredicate(scf::IfOp ifOp) {
 }
 
 struct VectorDistributionResult {
-  vector::WarpExecuteOnLane0Op warpOp;
+  gpu::WarpExecuteOnLane0Op warpOp;
 };
 
 static FailureOr<VectorDistributionResult>
@@ -254,7 +257,7 @@ rewriteScfIfAsWarpExecuteOnLane0(RewriterBase &rewriter, Location loc,
         rewriter.create<scf::IfOp>(loc, predicate, /*withElseRegion=*/false);
     rewriter.setInsertionPointToStart(&newIfOp.getThenRegion().front());
   }
-  auto warpOp = rewriter.create<vector::WarpExecuteOnLane0Op>(
+  auto warpOp = rewriter.create<gpu::WarpExecuteOnLane0Op>(
       loc, TypeRange(), threadIdxx, warpSize);
 
   // Move the code from the previous ifOp to the
@@ -267,7 +270,7 @@ rewriteScfIfAsWarpExecuteOnLane0(RewriterBase &rewriter, Location loc,
                                      sourceBlock.without_terminator().begin(),
                                      sourceBlock.without_terminator().end());
   rewriter.setInsertionPointToEnd(&targetBlock);
-  rewriter.create<vector::YieldOp>(loc);
+  rewriter.create<gpu::YieldOp>(loc);
 
   // Erase old op.
   rewriter.eraseOp(ifOp);
@@ -355,7 +358,7 @@ void transform_dialect::VectorWarpDistributionOp::getEffects(
 /// Emit shared local memory allocation in case it is needed when lowering the
 /// warp operations.
 static Value allocateGlobalSharedMemory(Location loc, OpBuilder &builder,
-                                        vector::WarpExecuteOnLane0Op warpOp,
+                                        gpu::WarpExecuteOnLane0Op warpOp,
                                         Type type) {
   MemRefType memrefType;
   auto addressSpaceAttr = gpu::AddressSpaceAttr::get(
@@ -371,11 +374,11 @@ static Value allocateGlobalSharedMemory(Location loc, OpBuilder &builder,
   return builder.create<memref::AllocOp>(loc, memrefType);
 }
 
-/// Return a value yielded by `warpOp` which statifies the filter lamdba
+/// Return a value yielded by `warpOp` which satisfies the filter lambda
 /// condition and is not dead.
-static OpOperand *getWarpResult(vector::WarpExecuteOnLane0Op warpOp,
+static OpOperand *getWarpResult(gpu::WarpExecuteOnLane0Op warpOp,
                                 function_ref<bool(Operation *)> fn) {
-  auto yield = cast<vector::YieldOp>(
+  auto yield = cast<gpu::YieldOp>(
       warpOp.getBodyRegion().getBlocks().begin()->getTerminator());
   for (OpOperand &yieldOperand : yield->getOpOperands()) {
     Value yieldValues = yieldOperand.get();
@@ -423,9 +426,9 @@ public:
 /// }
 /// gpu.synchronize
 /// %0 = memref.load %src[%c0] : memref<1024xf32>
-struct WarpOpLoad : public OpRewritePattern<vector::WarpExecuteOnLane0Op> {
-  using OpRewritePattern<vector::WarpExecuteOnLane0Op>::OpRewritePattern;
-  LogicalResult matchAndRewrite(vector::WarpExecuteOnLane0Op warpOp,
+struct WarpOpLoad : public OpRewritePattern<gpu::WarpExecuteOnLane0Op> {
+  using OpRewritePattern<gpu::WarpExecuteOnLane0Op>::OpRewritePattern;
+  LogicalResult matchAndRewrite(gpu::WarpExecuteOnLane0Op warpOp,
                                 PatternRewriter &rewriter) const override {
     OpOperand *operand = getWarpResult(warpOp, llvm::IsaPred<memref::LoadOp>);
     if (!operand)
@@ -473,7 +476,7 @@ struct HoistSharedMemoryAlloc : public OpRewritePattern<memref::AllocOp> {
                                 PatternRewriter &rewriter) const override {
     if (!iree_compiler::hasSharedMemoryAddressSpace(alloc.getType()))
       return failure();
-    auto warpParent = alloc->getParentOfType<vector::WarpExecuteOnLane0Op>();
+    auto warpParent = alloc->getParentOfType<gpu::WarpExecuteOnLane0Op>();
     if (!warpParent)
       return failure();
     alloc->moveBefore(warpParent);
@@ -558,7 +561,7 @@ static void populatePropagateVectorDistribution(Operation *target,
 }
 
 static void warpSyncronizationFn(Location loc, OpBuilder &builder,
-                                 vector::WarpExecuteOnLane0Op warpOp) {
+                                 gpu::WarpExecuteOnLane0Op warpOp) {
   builder.create<gpu::BarrierOp>(loc);
 };
 
@@ -603,8 +606,8 @@ transform_dialect::VectorWarpDistributionOp::applyToOne(
   });
   GreedyRewriteConfig config;
   config.listener = &listener;
-  if (failed(applyPatternsAndFoldGreedily(
-          target, std::move(preProcessingPatterns), config))) {
+  if (failed(applyPatternsGreedily(target, std::move(preProcessingPatterns),
+                                   config))) {
     return mlir::emitDefiniteFailure(target,
                                      "multi-reduce patterns failed to apply");
   }
@@ -615,8 +618,7 @@ transform_dialect::VectorWarpDistributionOp::applyToOne(
   unsigned subgroupSizeU = static_cast<unsigned>(subgroupSize.value());
   populatePropagateVectorDistribution(target, patterns,
                                       /*benefit=*/1, subgroupSizeU);
-  if (failed(
-          applyPatternsAndFoldGreedily(target, std::move(patterns), config))) {
+  if (failed(applyPatternsGreedily(target, std::move(patterns), config))) {
     return mlir::emitDefiniteFailure(
         target, "warp distribution patterns failed to apply");
   }
@@ -627,8 +629,7 @@ transform_dialect::VectorWarpDistributionOp::applyToOne(
   options.warpSyncronizationFn = warpSyncronizationFn;
   populateWarpExecuteOnLane0ToScf(target, endPatterns, options,
                                   /*benefit=*/0);
-  if (failed(applyPatternsAndFoldGreedily(target, std::move(endPatterns),
-                                          config))) {
+  if (failed(applyPatternsGreedily(target, std::move(endPatterns), config))) {
     return mlir::emitDefiniteFailure(
         target, "warp execute on lane 0 to scf patterns failed to apply");
   }
@@ -678,8 +679,7 @@ transform_dialect::VectorToMMAConversionOp::applyToOne(
   RewritePatternSet patterns(ctx);
   mlir::vector::populateCastAwayVectorLeadingOneDimPatterns(patterns);
   populatePrepareVectorToMMAPatterns(patterns, getUseMmaSync());
-  if (failed(
-          applyPatternsAndFoldGreedily(target, std::move(patterns), config))) {
+  if (failed(applyPatternsGreedily(target, std::move(patterns), config))) {
     target->emitOpError("vector to mma preparation patterns failed to apply");
     return emitDefaultDefiniteFailure(target);
   }
@@ -712,8 +712,8 @@ transform_dialect::VectorToMMAConversionOp::applyToOne(
   RewritePatternSet f32ToTF32patterns(funcOp.getContext());
   nvgpu::populateMmaSyncF32ToTF32Patterns(f32ToTF32patterns,
                                           nvgpu::MmaSyncF32Lowering::TF32);
-  if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(f32ToTF32patterns),
-                                          config)))
+  if (failed(
+          applyPatternsGreedily(funcOp, std::move(f32ToTF32patterns), config)))
     return mlir::emitDefiniteFailure(
         target, "vector to mma F32ToTF32 patterns failed to apply");
 
@@ -1411,8 +1411,7 @@ transform_dialect::EliminateGpuBarriersOp::applyToOne(
   });
   GreedyRewriteConfig config;
   config.listener = &listener;
-  if (failed(
-          applyPatternsAndFoldGreedily(target, std::move(patterns), config))) {
+  if (failed(applyPatternsGreedily(target, std::move(patterns), config))) {
     return emitDefaultSilenceableFailure(target);
   }
 
@@ -1460,6 +1459,10 @@ class TransformVectorLayoutOptions : public VectorLayoutOptions {
 public:
   TransformVectorLayoutOptions(Operation *root, bool fullConversion)
       : VectorLayoutOptions(root, fullConversion) {}
+
+  VectorLayoutInterface getDefaultLayout(VectorType type) const override {
+    return VectorLayoutInterface();
+  }
 };
 
 DiagnosedSilenceableFailure
@@ -1473,15 +1476,10 @@ transform_dialect::AMDGPUDistributeVectorsOp::applyToOne(
   rewriter.setInsertionPointToStart(&target.getFunctionBody().front());
   Value laneId =
       rewriter.create<gpu::ThreadIdOp>(target.getLoc(), gpu::Dimension::x);
+  int64_t subgroupSize = getSubgroupSize();
 
   populateGPUDistributionPatterns(patterns);
-  populateGPUDistributionLayoutAttrPatterns(laneId, patterns);
-  populateGPUReductionDistributionPatterns(patterns);
-  // For testing we use subgroup size = 64.
-  populateGPUDistributeNestedLayoutAttrPatterns(patterns, laneId,
-                                                /*subgroupSize=*/64);
-  populateAMDGPUDistributionPatterns(patterns);
-  populateGPULayoutResolutionDistributionPatterns(patterns);
+  populateGPUDistributeNestedLayoutAttrPatterns(patterns, laneId, subgroupSize);
   if (failed(distributeVectorOps(target, patterns, options))) {
     return emitDefaultSilenceableFailure(target);
   }
@@ -1547,145 +1545,6 @@ transform_dialect::CreateMatmulMfmaTileSizesOp::apply(
   results.setParams(cast<OpResult>(getResult(0)), paramsArray0);
   results.setParams(cast<OpResult>(getResult(1)), paramsArray0);
   return DiagnosedSilenceableFailure::success();
-}
-
-//===----------------------------------------------------------------------===//
-// SetContractionLayoutAttributes
-//===----------------------------------------------------------------------===//
-
-/// This function creates a modified version of the MFMA layout that allows
-/// for reading more elements from LDS. Specifically, the MFMA layout looks
-/// something like this:
-/// <<[ BATCHY,  LANEX], [2, 16]>, <[ BATCHX,  LANEY,  VECTORX], [8, 4, 4]>>
-/// Here VECTORX specifies how many elements can be read from LDS.
-/// Now, in order to read more elements from LDS, we can modify this layout
-/// while maintaining the overall shape to:
-/// <<[ BATCHY,  LANEX], [2, 16]>, <[ BATCHX,  LANEY,  VECTORX], [4, 4, 8]>>
-/// This is what this function does. In situations where the batch dimension
-/// is too small, or if we are not transferring 4 elements at a time, it
-/// returns nullopt.
-static std::optional<VectorExt::LayoutAttr>
-createReadLayout(MLIRContext *ctx, const VectorExt::LayoutAttr &layout) {
-  SmallVector<VectorExt::PerDimLayoutAttr> perDimLayouts;
-  for (VectorExt::PerDimLayoutAttr perDimLayout : layout.getLayouts()) {
-    DenseSet<VectorExt::LayoutDimension> labels;
-    for (VectorExt::LayoutDimensionAttr dim : perDimLayout.getLabels()) {
-      labels.insert(dim.getValue());
-    }
-    if (!labels.contains(VectorExt::LayoutDimension::VECTORX)) {
-      perDimLayouts.push_back(perDimLayout);
-      continue;
-    }
-    SmallVector<int64_t> newShapes;
-    for (auto [label, shape] :
-         llvm::zip_equal(perDimLayout.getLabels(), perDimLayout.getShapes())) {
-      if (VectorExt::isBatchDimension(label.getValue())) {
-        if (shape == 1)
-          return std::nullopt;
-        newShapes.push_back(shape / 2);
-        continue;
-      }
-      if (label.getValue() == VectorExt::LayoutDimension::VECTORX) {
-        if (shape != 4)
-          return std::nullopt;
-        newShapes.push_back(shape * 2);
-        continue;
-      }
-      newShapes.push_back(shape);
-    }
-    perDimLayouts.push_back(VectorExt::PerDimLayoutAttr::get(
-        ctx, perDimLayout.getLabels(), newShapes));
-  }
-  return VectorExt::LayoutAttr::get(ctx, perDimLayouts);
-}
-
-DiagnosedSilenceableFailure
-transform_dialect::SetContractionLayoutAttributes::apply(
-    transform::TransformRewriter &rewriter,
-    transform::TransformResults &results, transform::TransformState &state) {
-  auto payloadList = state.getPayloadOps(getTarget());
-  auto typeList = state.getParams(getMmaType());
-  if (typeList.size() != 1) {
-    return emitDefiniteFailure()
-           << "invalid more than one attribute for contraction annotation";
-  }
-  auto mmaType = llvm::dyn_cast<IREE::GPU::MmaInterfaceAttr>(typeList.front());
-  if (!mmaType) {
-    return emitDefiniteFailure()
-           << "invalid non-mma attribute for contraction annotation "
-           << typeList.front();
-  }
-
-  for (Operation *payload : payloadList) {
-    auto contract = llvm::dyn_cast<vector::ContractionOp>(payload);
-    if (!contract) {
-      return emitDefiniteFailure()
-             << "invalid non-contraction annotation " << payload;
-    }
-
-    auto maybeLayouts = mmaType.getContractionLayout(contract);
-    if (failed(maybeLayouts)) {
-      return emitDefiniteFailure()
-             << "invalid opaque mma layout for annotation " << mmaType;
-    }
-
-    Location loc = contract.getLoc();
-    auto [aLayout, bLayout, cLayout] = *maybeLayouts;
-
-    // Set packed read layout for specified indices.
-    ArrayRef<int64_t> operandIndices = getReadLayoutIndices();
-    if (!operandIndices.empty()) {
-      SmallVector<Value> operands;
-      SmallVector<VectorExt::VectorLayoutInterface> layouts;
-      for (int64_t index : operandIndices) {
-        operands.push_back(contract.getOperand(index));
-        layouts.push_back(index == 0 ? aLayout : bLayout);
-      }
-      rewriter.setInsertionPoint(contract);
-      for (const auto &idxAndVals :
-           llvm::enumerate(llvm::zip_equal(operands, layouts))) {
-        int64_t i = idxAndVals.index();
-        auto [operand, layoutInterface] = idxAndVals.value();
-        VectorExt::LayoutAttr layout =
-            dyn_cast<VectorExt::LayoutAttr>(layoutInterface);
-        std::optional<VectorExt::LayoutAttr> maybeReadLayout =
-            createReadLayout(rewriter.getContext(), layout);
-        if (!maybeReadLayout)
-          continue;
-        VectorExt::LayoutAttr readLayout = maybeReadLayout.value();
-        Operation *parentOp = operand.getDefiningOp();
-        if (!parentOp || (parentOp->getNumResults() != 1))
-          continue;
-        Value resolvedOperand =
-            rewriter.create<VectorExt::ToLayoutOp>(loc, operand, readLayout);
-        contract.setOperand(operandIndices[i], resolvedOperand);
-      }
-    }
-
-    // Set layout anchors.
-    rewriter.setInsertionPoint(contract);
-    Value newLhs =
-        rewriter.create<VectorExt::ToLayoutOp>(loc, contract.getLhs(), aLayout);
-    Value newRhs =
-        rewriter.create<VectorExt::ToLayoutOp>(loc, contract.getRhs(), bLayout);
-    Value newAcc =
-        rewriter.create<VectorExt::ToLayoutOp>(loc, contract.getAcc(), cLayout);
-    contract.setOperand(0, newLhs);
-    contract.setOperand(1, newRhs);
-    contract.setOperand(2, newAcc);
-
-    // Set intrinsic type.
-    contract->setAttr("iree.amdgpu.mma", mmaType);
-  }
-
-  return DiagnosedSilenceableFailure::success();
-}
-
-void transform_dialect::SetContractionLayoutAttributes::getEffects(
-    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
-  transform::onlyReadsHandle(getTargetMutable(), effects);
-  transform::onlyReadsHandle(getMmaTypeMutable(), effects);
-  transform::modifiesPayload(effects);
 }
 
 #define GET_OP_CLASSES

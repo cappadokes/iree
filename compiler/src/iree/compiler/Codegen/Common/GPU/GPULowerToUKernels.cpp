@@ -5,13 +5,19 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "iree/compiler/Codegen/Common/GPU/Passes.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenDialect.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenOps.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/UKernelOps.h"
-#include "iree/compiler/Codegen/Utils/GPUUtils.h"
+#include "iree/compiler/Codegen/Dialect/GPU/IR/GPULoweringConfigUtils.h"
+#include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUOps.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/IR/AsmState.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/MLIRContext.h"
@@ -24,89 +30,23 @@ namespace mlir::iree_compiler {
 
 namespace {
 
-/// Holds a function name and attributes.
-struct FnNameAndDefAttrs {
-  std::string name;
-  SmallVector<NamedAttribute> defAttrs;
-};
-
-/// Returns the function name and attributes to use for a ukernel with given
-/// `ukernelName` on the target described by `targetAttr`.
-static FnNameAndDefAttrs
-getFnNameAndDefAttrs(const char *ukernelName, std::string &typeSuffixID,
-                     RewriterBase &rewriter,
-                     IREE::HAL::ExecutableTargetAttr targetAttr) {
-  FnNameAndDefAttrs result;
-  if (isROCMBackend(targetAttr)) {
-    result.name =
-        std::string("__iree_uk_rocm_") + ukernelName + "_" + typeSuffixID;
-    result.defAttrs.emplace_back(rewriter.getStringAttr("vm.import.module"),
-                                 rewriter.getStringAttr("rocm"));
-  }
-  return result;
-}
-
 /// Matches generic that represent argmax and check if
 /// we have the ukernel that matches it shape constraint, and types.
 /// If we do, then we convert into iree_codegen.ukernel.argmax operation,
 /// that is later lowered into a call to the microkernel.
 static FailureOr<IREE::Codegen::UKernelOpInterface>
 matchArgmaxDAGForUKernel(RewriterBase &rewriter, linalg::GenericOp op) {
-  auto targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(op);
-  const char ukernelName[] = "argmax";
-  if (!hasUkernel(targetAttr, ukernelName) ||
-      !hasUkernelSupportedGpuArch(targetAttr)) {
-    return failure();
-  }
-
-  // Currently only support argmax where parallel dims are 1.
-  // Tiling pipeline is also set to tile all parallel dims to 1, and
-  // reduction dim to be size of whole reduction problem. Which allow
-  // this constraint to be true for a lot of argmax variances.
-  // TODO: Support multi-row or grid-strided argmax ukernel.
-  SmallVector<int64_t, 4> bounds = op.getStaticLoopRanges();
-  SmallVector<unsigned> parallelDims;
-  op.getParallelDims(parallelDims);
-  int64_t parallelSize = 1;
-  for (int64_t dim : parallelDims) {
-    if (ShapedType::isDynamic(bounds[dim])) {
-      return failure();
-    }
-    parallelSize *= bounds[dim];
-  }
-  if (parallelSize != 1)
-    return failure();
-
-  // Get value/input type.
   Value input = op.getDpsInputOperand(0)->get();
-  auto inputType = llvm::cast<ShapedType>(input.getType());
-  Type inputElemType = inputType.getElementType();
-  // Only support f16 and f32 values.
-  if (!inputElemType.isF16() && !inputElemType.isF32()) {
-    return failure();
-  }
-
-  // Get index type.
   Value index = op.getDpsInitOperand(1)->get();
-  auto indexType = llvm::cast<ShapedType>(index.getType());
-  Type indexElemType = indexType.getElementType();
-  // Only support i32 and i64 index.
-  if (!indexElemType.isInteger(32) && !indexElemType.isInteger(64)) {
-    return failure();
+  auto indexType = cast<ShapedType>(index.getType());
+  auto loweringConfig = getLoweringConfig<IREE::GPU::LoweringConfigAttr>(op);
+  if (!loweringConfig) {
+    return rewriter.notifyMatchFailure(op, "no lowering_config on this op");
   }
-
-  std::string typeSuffixID = "";
-  if (inputElemType.isF16() && indexElemType.isInteger(32)) {
-    typeSuffixID = "F16I32";
-  } else if (inputElemType.isF16() && indexElemType.isInteger(64)) {
-    typeSuffixID = "F16I64";
-  } else if (inputElemType.isF32() && indexElemType.isInteger(32)) {
-    typeSuffixID = "F32I32";
-  } else if (inputElemType.isF32() && indexElemType.isInteger(64)) {
-    typeSuffixID = "F32I64";
-  } else {
-    return rewriter.notifyMatchFailure(
-        op, "unsupported combination of element types");
+  IREE::GPU::UKernelConfigAttr ukernelAttr =
+      IREE::GPU::getUkernelSpec(loweringConfig);
+  if (!ukernelAttr) {
+    return rewriter.notifyMatchFailure(op, "no ukernel selected for this op");
   }
 
   Location loc = op.getLoc();
@@ -115,31 +55,20 @@ matchArgmaxDAGForUKernel(RewriterBase &rewriter, linalg::GenericOp op) {
   const int kReductionDim = op.getNumLoops() - 1;
   Value reductionDimSize =
       rewriter.create<tensor::DimOp>(loc, input, kReductionDim);
-  auto fn =
-      getFnNameAndDefAttrs(ukernelName, typeSuffixID, rewriter, targetAttr);
   auto genericMicroKernelOp = rewriter.create<IREE::Codegen::UKernelGenericOp>(
-      loc, indexType, fn.name, ValueRange{input}, index,
-      ValueRange{reductionDimSize},
-      /*fn_def_attrs=*/rewriter.getDictionaryAttr(fn.defAttrs),
+      loc, indexType, ukernelAttr.getName(), ValueRange{input}, index,
+      ValueRange{reductionDimSize}, ukernelAttr.getDefAttrs(),
       /*strided_outer_dims=*/rewriter.getIndexAttr(0));
   return cast<IREE::Codegen::UKernelOpInterface>(
       genericMicroKernelOp.getOperation());
 }
 
-using TargetPredicate = std::function<bool(IREE::HAL::ExecutableTargetAttr)>;
-
 struct LowerArgmaxToUKernelPattern : OpRewritePattern<linalg::GenericOp> {
-  LowerArgmaxToUKernelPattern(MLIRContext *context,
-                              TargetPredicate targetPredicate)
-      : OpRewritePattern<linalg::GenericOp>(context),
-        targetPredicate(targetPredicate) {}
+  LowerArgmaxToUKernelPattern(MLIRContext *context)
+      : OpRewritePattern<linalg::GenericOp>(context) {}
 
   LogicalResult matchAndRewrite(linalg::GenericOp op,
                                 PatternRewriter &rewriter) const override {
-    if (targetPredicate &&
-        !targetPredicate(IREE::HAL::ExecutableTargetAttr::lookup(op))) {
-      return failure();
-    }
     if (failed(isArgmaxOp(op))) {
       return failure();
     }
@@ -153,8 +82,71 @@ struct LowerArgmaxToUKernelPattern : OpRewritePattern<linalg::GenericOp> {
                                 ukernelOp.value()->getResults());
     return success();
   }
+};
 
-  TargetPredicate targetPredicate;
+static Value createSharedMemory(PatternRewriter &rewriter, Location loc,
+                                int sharedMemoryBytes) {
+  RankedTensorType tensorType =
+      RankedTensorType::get({sharedMemoryBytes}, rewriter.getI8Type());
+  ValueRange dynSizes{};
+  if (!sharedMemoryBytes) {
+    IREE::Codegen::NullPointerType nullPointerType =
+        IREE::Codegen::NullPointerType::get(rewriter.getContext());
+    return rewriter.create<IREE::Codegen::NullPointerOp>(loc, nullPointerType);
+  }
+  auto allocOp =
+      rewriter.create<bufferization::AllocTensorOp>(loc, tensorType, dynSizes);
+  Attribute sharedAddrSpace = gpu::AddressSpaceAttr::get(
+      rewriter.getContext(), gpu::GPUDialect::getWorkgroupAddressSpace());
+  allocOp.setMemorySpaceAttr(sharedAddrSpace);
+  return allocOp;
+}
+
+struct LowerMultiMmaToUKernelPattern : OpRewritePattern<IREE::GPU::MultiMmaOp> {
+  LowerMultiMmaToUKernelPattern(MLIRContext *context)
+      : OpRewritePattern<IREE::GPU::MultiMmaOp>(context) {}
+
+  LogicalResult matchAndRewrite(IREE::GPU::MultiMmaOp op,
+                                PatternRewriter &rewriter) const override {
+    auto loweringConfig = getLoweringConfig<IREE::GPU::LoweringConfigAttr>(op);
+    if (!loweringConfig) {
+      return rewriter.notifyMatchFailure(op, "no lowering_config on this op");
+    }
+    IREE::GPU::UKernelConfigAttr ukernelAttr =
+        IREE::GPU::getUkernelSpec(loweringConfig);
+    if (!ukernelAttr) {
+      return rewriter.notifyMatchFailure(op, "no ukernel selected for this op");
+    }
+    auto mma = dyn_cast<IREE::GPU::DataTiledMMAAttr>(op.getKind());
+    if (!mma) {
+      return rewriter.notifyMatchFailure(op, "unhandled MMAInterfaceAttr");
+    }
+    Location loc = op->getLoc();
+    Type I32Type = rewriter.getI32Type();
+    auto castIndexToI32 = [&](Value val) {
+      return rewriter.create<arith::IndexCastOp>(loc, I32Type, val);
+    };
+    auto constI32 = [&](int val) {
+      return rewriter.create<arith::ConstantIntOp>(loc, val, I32Type);
+    };
+    int64_t sharedMemoryBytes = ukernelAttr.getSharedMemoryBytes();
+    auto sharedMemory = createSharedMemory(rewriter, loc, sharedMemoryBytes);
+    Value k = castIndexToI32(
+        rewriter.create<tensor::DimOp>(op.getLoc(), op.getLhs(), 1));
+    Value intrinsicsM = constI32(mma.getIntrinsicsM());
+    Value subgroupsM = constI32(mma.getSubgroupsM());
+    Value intrinsicsN = constI32(mma.getIntrinsicsN());
+    Value subgroupsN = constI32(mma.getSubgroupsN());
+    Value intrinsicsK = constI32(mma.getIntrinsicsK());
+    rewriter.replaceOpWithNewOp<IREE::Codegen::UKernelGenericOp>(
+        op, TypeRange{op.getAccType()}, ukernelAttr.getName(),
+        ValueRange{op.getLhs(), op.getRhs()}, op.getAcc(),
+        ValueRange{sharedMemory, constI32(sharedMemoryBytes), k, intrinsicsM,
+                   subgroupsM, intrinsicsN, subgroupsN, intrinsicsK},
+        ukernelAttr.getDefAttrs(),
+        /*strided_outer_dims=*/rewriter.getIndexAttr(0));
+    return success();
+  }
 };
 
 struct GPULowerToUKernelsPass final
@@ -174,9 +166,9 @@ struct GPULowerToUKernelsPass final
     // evidence that it is difficult for codegen to consistently approach
     // microkernels performance, and that consideration overrides the benefit of
     // fusions for these ops.
-    patterns.insert<LowerArgmaxToUKernelPattern>(context, isROCMBackend);
-    if (failed(applyPatternsAndFoldGreedily(getOperation(),
-                                            std::move(patterns)))) {
+    patterns.add<LowerArgmaxToUKernelPattern, LowerMultiMmaToUKernelPattern>(
+        context);
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       return signalPassFailure();
     }
   }

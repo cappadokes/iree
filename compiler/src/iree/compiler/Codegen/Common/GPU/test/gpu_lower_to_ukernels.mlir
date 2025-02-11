@@ -1,17 +1,21 @@
-// RUN: iree-opt --split-input-file --iree-gpu-test-target=gfx1100 --pass-pipeline="builtin.module(func.func(iree-codegen-gpu-lower-to-ukernels,cse,canonicalize))" %s | FileCheck %s
-// RUN: iree-opt --split-input-file --iree-gpu-test-target=gfx90a --pass-pipeline="builtin.module(func.func(iree-codegen-gpu-lower-to-ukernels,cse,canonicalize))" %s | FileCheck %s --check-prefix=CDNA2
-// RUN: iree-opt --split-input-file --iree-gpu-test-target=gfx908 --pass-pipeline="builtin.module(func.func(iree-codegen-gpu-lower-to-ukernels,cse,canonicalize))" %s | FileCheck %s --check-prefix=CDNA1
+// RUN: iree-opt --split-input-file --pass-pipeline="builtin.module(func.func(iree-codegen-gpu-lower-to-ukernels,cse,canonicalize))" %s | FileCheck %s
 
-func.func @argmax_2d_f32i64(%arg0 : tensor<1x?xf32>) -> tensor<1xi64> attributes {
-  hal.executable.target = #hal.executable.target<"rocm", "rocm-hsaco-fb", {ukernels = "all"}>
-} {
+#config = #iree_gpu.lowering_config<{ukernel = #iree_gpu.ukernel_config<name = "some_ukernel", def_attrs = {vm.import.module = "rocm"}>}>
+func.func @argmax_f32i64_with_selected_ukernel(%arg0 : tensor<1x?xf32>) -> tensor<1xi64> {
   %c0_i64 = arith.constant 0 : i64
   %cst = arith.constant 0xFF800000 : f32
   %0 = tensor.empty() : tensor<1xi64>
   %1 = linalg.fill ins(%c0_i64 : i64) outs(%0 : tensor<1xi64>) -> tensor<1xi64>
   %2 = tensor.empty() : tensor<1xf32>
   %3 = linalg.fill ins(%cst : f32) outs(%2 : tensor<1xf32>) -> tensor<1xf32>
-  %4:2 = linalg.generic {indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0)>, affine_map<(d0, d1) -> (d0)>], iterator_types = ["parallel", "reduction"]} ins(%arg0 : tensor<1x?xf32>) outs(%3, %1 : tensor<1xf32>, tensor<1xi64>) {
+  %4:2 = linalg.generic {
+        indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0)>, affine_map<(d0, d1) -> (d0)>],
+        iterator_types = ["parallel", "reduction"]
+      }
+      ins(%arg0 : tensor<1x?xf32>) outs(%3, %1 : tensor<1xf32>, tensor<1xi64>)
+      attrs = {
+        // The lowering_config.ukernel is what is essential to the lowering.
+        lowering_config = #config} {
   ^bb0(%in: f32, %out: f32, %out_0: i64):
     %5 = linalg.index 1 : index
     %6 = arith.index_cast %5 : index to i64
@@ -23,28 +27,31 @@ func.func @argmax_2d_f32i64(%arg0 : tensor<1x?xf32>) -> tensor<1xi64> attributes
   return %4#1 : tensor<1xi64>
 }
 
-//CHECK-LABEL: func @argmax_2d_f32i64(
+//CHECK-LABEL: func @argmax_f32i64_with_selected_ukernel(
 // CHECK-SAME:     %[[ARG0:[a-zA-Z0-9]+]]: tensor<1x?xf32>
 //  CHECK-DAG:   %[[C1_index:.+]] = arith.constant 1 : index
 //  CHECK-DAG:   %[[C0_i64:.+]] = arith.constant 0
 //  CHECK-DAG:   %[[FILL:.+]] = linalg.fill ins(%[[C0_i64]]
-//      CHECK:   %[[MICRO_KERNEL:.+]] = iree_codegen.ukernel.generic "__iree_uk_rocm_argmax_F32I64"
+//      CHECK:   %[[MICRO_KERNEL:.+]] = iree_codegen.ukernel.generic
+//  CHECK-SAME:      "some_ukernel"
 // CHECK-SAME:       ins(%[[ARG0]] :
 // CHECK-SAME:       outs(%[[FILL]] :
 //      CHECK:   return %[[MICRO_KERNEL]]
 
 // -----
 
-func.func @argmax_4d_unit_parallel_f32i64(%arg0 : tensor<1x1x1x?xf32>) -> tensor<1x1x1xi64> attributes {
-  hal.executable.target = #hal.executable.target<"rocm", "rocm-hsaco-fb", {ukernels = "all"}>
-} {
+func.func @argmax_f32i64_without_selected_ukernel(%arg0 : tensor<1x?xf32>) -> tensor<1xi64> {
   %c0_i64 = arith.constant 0 : i64
   %cst = arith.constant 0xFF800000 : f32
-  %0 = tensor.empty() : tensor<1x1x1xi64>
-  %1 = linalg.fill ins(%c0_i64 : i64) outs(%0 : tensor<1x1x1xi64>) -> tensor<1x1x1xi64>
-  %2 = tensor.empty() : tensor<1x1x1xf32>
-  %3 = linalg.fill ins(%cst : f32) outs(%2 : tensor<1x1x1xf32>) -> tensor<1x1x1xf32>
-  %4:2 = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>, affine_map<(d0, d1, d2, d3) -> (d0, d1, d2)>, affine_map<(d0, d1, d2, d3) -> (d0, d1, d2)>], iterator_types = ["parallel", "parallel", "parallel", "reduction"]} ins(%arg0 : tensor<1x1x1x?xf32>) outs(%3, %1 : tensor<1x1x1xf32>, tensor<1x1x1xi64>) {
+  %0 = tensor.empty() : tensor<1xi64>
+  %1 = linalg.fill ins(%c0_i64 : i64) outs(%0 : tensor<1xi64>) -> tensor<1xi64>
+  %2 = tensor.empty() : tensor<1xf32>
+  %3 = linalg.fill ins(%cst : f32) outs(%2 : tensor<1xf32>) -> tensor<1xf32>
+  %4:2 = linalg.generic {
+        indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0)>, affine_map<(d0, d1) -> (d0)>],
+        iterator_types = ["parallel", "reduction"]
+      }
+      ins(%arg0 : tensor<1x?xf32>) outs(%3, %1 : tensor<1xf32>, tensor<1xi64>) {
   ^bb0(%in: f32, %out: f32, %out_0: i64):
     %5 = linalg.index 1 : index
     %6 = arith.index_cast %5 : index to i64
@@ -52,235 +59,50 @@ func.func @argmax_4d_unit_parallel_f32i64(%arg0 : tensor<1x1x1x?xf32>) -> tensor
     %8 = arith.cmpf ogt, %in, %out : f32
     %9 = arith.select %8, %6, %out_0 : i64
     linalg.yield %7, %9 : f32, i64
-  } -> (tensor<1x1x1xf32>, tensor<1x1x1xi64>)
-  return %4#1 : tensor<1x1x1xi64>
+  } -> (tensor<1xf32>, tensor<1xi64>)
+  return %4#1 : tensor<1xi64>
 }
 
-//      CHECK-LABEL: func @argmax_4d_unit_parallel_f32i64(
-//      CHECK: iree_codegen.ukernel.generic
-//      CHECK-NOT: linalg.generic
-
-// -----
-
-func.func @argmax_2d_non_unit_parallel_f32i64(%arg0 : tensor<4x?xf32>) -> tensor<4xi64> attributes {
-  hal.executable.target = #hal.executable.target<"rocm", "rocm-hsaco-fb", {ukernels = "all"}>
-} {
-  %c0_i64 = arith.constant 0 : i64
-  %cst = arith.constant 0xFF800000 : f32
-  %0 = tensor.empty() : tensor<4xi64>
-  %1 = linalg.fill ins(%c0_i64 : i64) outs(%0 : tensor<4xi64>) -> tensor<4xi64>
-  %2 = tensor.empty() : tensor<4xf32>
-  %3 = linalg.fill ins(%cst : f32) outs(%2 : tensor<4xf32>) -> tensor<4xf32>
-  %4:2 = linalg.generic {indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0)>, affine_map<(d0, d1) -> (d0)>], iterator_types = ["parallel", "reduction"]} ins(%arg0 : tensor<4x?xf32>) outs(%3, %1 : tensor<4xf32>, tensor<4xi64>) {
-  ^bb0(%in: f32, %out: f32, %out_0: i64):
-    %5 = linalg.index 1 : index
-    %6 = arith.index_cast %5 : index to i64
-    %7 = arith.maximumf %in, %out : f32
-    %8 = arith.cmpf ogt, %in, %out : f32
-    %9 = arith.select %8, %6, %out_0 : i64
-    linalg.yield %7, %9 : f32, i64
-  } -> (tensor<4xf32>, tensor<4xi64>)
-  return %4#1 : tensor<4xi64>
-}
-
-//      CHECK-LABEL: func @argmax_2d_non_unit_parallel_f32i64(
+//CHECK-LABEL: func @argmax_f32i64_without_selected_ukernel(
 //      CHECK-NOT: iree_codegen.ukernel.generic
 //      CHECK: linalg.generic
 
 // -----
 
-func.func @argmax_2d_dyn_parallel_f32i64(%arg0 : tensor<?x?xf32>) -> tensor<?xi64> attributes {
-  hal.executable.target = #hal.executable.target<"rocm", "rocm-hsaco-fb", {ukernels = "all"}>
-} {
-  %c0 = arith.constant 0 : index
-  %c0_i64 = arith.constant 0 : i64
-  %cst = arith.constant 0xFF800000 : f32
-  %dim = tensor.dim %arg0, %c0 : tensor<?x?xf32>
-  %0 = tensor.empty(%dim) : tensor<?xi64>
-  %1 = linalg.fill ins(%c0_i64 : i64) outs(%0 : tensor<?xi64>) -> tensor<?xi64>
-  %2 = tensor.empty(%dim) : tensor<?xf32>
-  %3 = linalg.fill ins(%cst : f32) outs(%2 : tensor<?xf32>) -> tensor<?xf32>
-  %4:2 = linalg.generic {indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0)>, affine_map<(d0, d1) -> (d0)>], iterator_types = ["parallel", "reduction"]} ins(%arg0 : tensor<?x?xf32>) outs(%3, %1 : tensor<?xf32>, tensor<?xi64>) {
-  ^bb0(%in: f32, %out: f32, %out_0: i64):
-    %5 = linalg.index 1 : index
-    %6 = arith.index_cast %5 : index to i64
-    %7 = arith.maximumf %in, %out : f32
-    %8 = arith.cmpf ogt, %in, %out : f32
-    %9 = arith.select %8, %6, %out_0 : i64
-    linalg.yield %7, %9 : f32, i64
-  } -> (tensor<?xf32>, tensor<?xi64>)
-  return %4#1 : tensor<?xi64>
+func.func @multi_mma_mfma_i32_16x16x32_i8(%a : tensor<1x2x8x1x1x2x8xi8>, %b : tensor<1x2x1x2x1x1x2x8xi8>, %c : tensor<1x1x1x8x2x1x1x4xi32>) -> tensor<1x1x1x8x2x1x1x4xi32> {
+  %d = iree_gpu.multi_mma %a, %b, %c {
+    indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d2)>, affine_map<(d0, d1, d2) -> (d1, d2)>, affine_map<(d0, d1, d2) -> (d0, d1)>],
+    iterator_types = [#iree_gpu.iterator_type<parallel>, #iree_gpu.iterator_type<parallel>, #iree_gpu.iterator_type<reduction>],
+    kind = #iree_gpu.data_tiled_mma_layout<intrinsic =  MFMA_I32_16x16x32_I8, intrinsics_m = 8, intrinsics_n = 2, subgroups_n = 4, intrinsics_k = 2>,
+    lowering_config = #iree_gpu.lowering_config<{
+      reduction = [0, 0, 0],
+      ukernel = #iree_gpu.ukernel_config<name = "iree_uk_amdgpu_multi_mma_mfma_i32_16x16x32_i8", def_attrs = {vm.import.module = "rocm"}, shared_memory_bytes = 16384>,
+      workgroup = [1, 1, 0]}>
+  } : tensor<1x2x8x1x1x2x8xi8>, tensor<1x2x1x2x1x1x2x8xi8> into tensor<1x1x1x8x2x1x1x4xi32>
+  return %d : tensor<1x1x1x8x2x1x1x4xi32>
 }
 
-//      CHECK-LABEL: func @argmax_2d_dyn_parallel_f32i64(
-//      CHECK-NOT: iree_codegen.ukernel.generic
-//      CHECK: linalg.generic
+// CHECK-LABEL: func @multi_mma_mfma_i32_16x16x32_i8(
+//       CHECK:   bufferization.alloc_tensor() {memory_space = #gpu.address_space<workgroup>} : tensor<16384xi8>
+//       CHECK:   iree_codegen.ukernel.generic
+//  CHECK-SAME:      "iree_uk_amdgpu_multi_mma_mfma_i32_16x16x32_i8"
 
 // -----
 
-func.func @argmax_none_ukernel_enabled(%arg0 : tensor<1x?xf32>) -> tensor<1xi64> attributes {
-  hal.executable.target = #hal.executable.target<"rocm", "rocm-hsaco-fb", {ukernels = "none"}>
-} {
-  %c0_i64 = arith.constant 0 : i64
-  %cst = arith.constant 0xFF800000 : f32
-  %0 = tensor.empty() : tensor<1xi64>
-  %1 = linalg.fill ins(%c0_i64 : i64) outs(%0 : tensor<1xi64>) -> tensor<1xi64>
-  %2 = tensor.empty() : tensor<1xf32>
-  %3 = linalg.fill ins(%cst : f32) outs(%2 : tensor<1xf32>) -> tensor<1xf32>
-  %4:2 = linalg.generic {indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0)>, affine_map<(d0, d1) -> (d0)>], iterator_types = ["parallel", "reduction"]} ins(%arg0 : tensor<1x?xf32>) outs(%3, %1 : tensor<1xf32>, tensor<1xi64>) {
-  ^bb0(%in: f32, %out: f32, %out_0: i64):
-    %5 = linalg.index 1 : index
-    %6 = arith.index_cast %5 : index to i64
-    %7 = arith.maximumf %in, %out : f32
-    %8 = arith.cmpf ogt, %in, %out : f32
-    %9 = arith.select %8, %6, %out_0 : i64
-    linalg.yield %7, %9 : f32, i64
-  } -> (tensor<1xf32>, tensor<1xi64>)
-  return %4#1 : tensor<1xi64>
+func.func @multi_mma_mfma_i32_16x16x32_i8_one_subgroup_no_shared_memory(%a : tensor<1x2x8x1x1x2x8xi8>, %b : tensor<1x2x1x2x1x1x2x8xi8>, %c : tensor<1x1x1x8x2x1x1x4xi32>) -> tensor<1x1x1x8x2x1x1x4xi32> {
+  %d = iree_gpu.multi_mma %a, %b, %c {
+    indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d2)>, affine_map<(d0, d1, d2) -> (d1, d2)>, affine_map<(d0, d1, d2) -> (d0, d1)>],
+    iterator_types = [#iree_gpu.iterator_type<parallel>, #iree_gpu.iterator_type<parallel>, #iree_gpu.iterator_type<reduction>],
+    kind = #iree_gpu.data_tiled_mma_layout<intrinsic =  MFMA_I32_16x16x32_I8, intrinsics_m = 8, intrinsics_n = 2, intrinsics_k = 2>,
+    lowering_config = #iree_gpu.lowering_config<{
+      reduction = [0, 0, 0],
+      ukernel = #iree_gpu.ukernel_config<name = "iree_uk_amdgpu_multi_mma_mfma_i32_16x16x32_i8", def_attrs = {vm.import.module = "rocm"}, shared_memory_bytes = 0>,
+      workgroup = [1, 1, 0]}>
+  } : tensor<1x2x8x1x1x2x8xi8>, tensor<1x2x1x2x1x1x2x8xi8> into tensor<1x1x1x8x2x1x1x4xi32>
+  return %d : tensor<1x1x1x8x2x1x1x4xi32>
 }
 
-//      CHECK-LABEL: func @argmax_none_ukernel_enabled(
-//      CHECK-NOT: iree_codegen.ukernel.generic
-//      CHECK: linalg.generic
-
-// -----
-
-func.func @argmax_only_argmax_ukernel_enabled(%arg0 : tensor<1x?xf32>) -> tensor<1xi64> attributes {
-  hal.executable.target = #hal.executable.target<"rocm", "rocm-hsaco-fb", {ukernels = "argmax"}>
-} {
-  %c0_i64 = arith.constant 0 : i64
-  %cst = arith.constant 0xFF800000 : f32
-  %0 = tensor.empty() : tensor<1xi64>
-  %1 = linalg.fill ins(%c0_i64 : i64) outs(%0 : tensor<1xi64>) -> tensor<1xi64>
-  %2 = tensor.empty() : tensor<1xf32>
-  %3 = linalg.fill ins(%cst : f32) outs(%2 : tensor<1xf32>) -> tensor<1xf32>
-  %4:2 = linalg.generic {indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0)>, affine_map<(d0, d1) -> (d0)>], iterator_types = ["parallel", "reduction"]} ins(%arg0 : tensor<1x?xf32>) outs(%3, %1 : tensor<1xf32>, tensor<1xi64>) {
-  ^bb0(%in: f32, %out: f32, %out_0: i64):
-    %5 = linalg.index 1 : index
-    %6 = arith.index_cast %5 : index to i64
-    %7 = arith.maximumf %in, %out : f32
-    %8 = arith.cmpf ogt, %in, %out : f32
-    %9 = arith.select %8, %6, %out_0 : i64
-    linalg.yield %7, %9 : f32, i64
-  } -> (tensor<1xf32>, tensor<1xi64>)
-  return %4#1 : tensor<1xi64>
-}
-
-//      CDNA2-LABEL: func @argmax_only_argmax_ukernel_enabled(
-//      CDNA2: iree_codegen.ukernel.generic
-//      CDNA2-NOT: linalg.generic
-
-// -----
-
-func.func @argmax_only_foo_argmax_bar_ukernel_enabled(%arg0 : tensor<1x?xf32>) -> tensor<1xi64> attributes {
-  hal.executable.target = #hal.executable.target<"rocm", "rocm-hsaco-fb", {ukernels = "foo,argmax,bar"}>
-} {
-  %c0_i64 = arith.constant 0 : i64
-  %cst = arith.constant 0xFF800000 : f32
-  %0 = tensor.empty() : tensor<1xi64>
-  %1 = linalg.fill ins(%c0_i64 : i64) outs(%0 : tensor<1xi64>) -> tensor<1xi64>
-  %2 = tensor.empty() : tensor<1xf32>
-  %3 = linalg.fill ins(%cst : f32) outs(%2 : tensor<1xf32>) -> tensor<1xf32>
-  %4:2 = linalg.generic {indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0)>, affine_map<(d0, d1) -> (d0)>], iterator_types = ["parallel", "reduction"]} ins(%arg0 : tensor<1x?xf32>) outs(%3, %1 : tensor<1xf32>, tensor<1xi64>) {
-  ^bb0(%in: f32, %out: f32, %out_0: i64):
-    %5 = linalg.index 1 : index
-    %6 = arith.index_cast %5 : index to i64
-    %7 = arith.maximumf %in, %out : f32
-    %8 = arith.cmpf ogt, %in, %out : f32
-    %9 = arith.select %8, %6, %out_0 : i64
-    linalg.yield %7, %9 : f32, i64
-  } -> (tensor<1xf32>, tensor<1xi64>)
-  return %4#1 : tensor<1xi64>
-}
-
-//      CHECK-LABEL: func @argmax_only_foo_argmax_bar_ukernel_enabled(
-//      CHECK: iree_codegen.ukernel.generic
-//      CHECK-NOT: linalg.generic
-
-//      CDNA2-LABEL: func @argmax_only_foo_argmax_bar_ukernel_enabled(
-
-// -----
-
-func.func @argmax_only_foo_ukernel_enabled(%arg0 : tensor<1x?xf32>) -> tensor<1xi64> attributes {
-  hal.executable.target = #hal.executable.target<"rocm", "rocm-hsaco-fb", {ukernels = "foo"}>
-} {
-  %c0_i64 = arith.constant 0 : i64
-  %cst = arith.constant 0xFF800000 : f32
-  %0 = tensor.empty() : tensor<1xi64>
-  %1 = linalg.fill ins(%c0_i64 : i64) outs(%0 : tensor<1xi64>) -> tensor<1xi64>
-  %2 = tensor.empty() : tensor<1xf32>
-  %3 = linalg.fill ins(%cst : f32) outs(%2 : tensor<1xf32>) -> tensor<1xf32>
-  %4:2 = linalg.generic {indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0)>, affine_map<(d0, d1) -> (d0)>], iterator_types = ["parallel", "reduction"]} ins(%arg0 : tensor<1x?xf32>) outs(%3, %1 : tensor<1xf32>, tensor<1xi64>) {
-  ^bb0(%in: f32, %out: f32, %out_0: i64):
-    %5 = linalg.index 1 : index
-    %6 = arith.index_cast %5 : index to i64
-    %7 = arith.maximumf %in, %out : f32
-    %8 = arith.cmpf ogt, %in, %out : f32
-    %9 = arith.select %8, %6, %out_0 : i64
-    linalg.yield %7, %9 : f32, i64
-  } -> (tensor<1xf32>, tensor<1xi64>)
-  return %4#1 : tensor<1xi64>
-}
-
-//      CHECK-LABEL: func @argmax_only_foo_ukernel_enabled(
-//      CHECK-NOT: iree_codegen.ukernel.generic
-//      CHECK: linalg.generic
-
-// -----
-
-// Currently we do only handle -Inf case as initial values.
-func.func @argmax_2d_f32i64_not_neg_inf_init(%arg0 : tensor<1x?xf32>) -> tensor<1xi64> attributes {
-  hal.executable.target = #hal.executable.target<"rocm", "rocm-hsaco-fb", {ukernels = "all"}>
-} {
-  %c0_i64 = arith.constant 0 : i64
-  %cst = arith.constant 0.0 : f32
-  %0 = tensor.empty() : tensor<1xi64>
-  %1 = linalg.fill ins(%c0_i64 : i64) outs(%0 : tensor<1xi64>) -> tensor<1xi64>
-  %2 = tensor.empty() : tensor<1xf32>
-  %3 = linalg.fill ins(%cst : f32) outs(%2 : tensor<1xf32>) -> tensor<1xf32>
-  %4:2 = linalg.generic {indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0)>, affine_map<(d0, d1) -> (d0)>], iterator_types = ["parallel", "reduction"]} ins(%arg0 : tensor<1x?xf32>) outs(%3, %1 : tensor<1xf32>, tensor<1xi64>) {
-  ^bb0(%in: f32, %out: f32, %out_0: i64):
-    %5 = linalg.index 1 : index
-    %6 = arith.index_cast %5 : index to i64
-    %7 = arith.maximumf %in, %out : f32
-    %8 = arith.cmpf ogt, %in, %out : f32
-    %9 = arith.select %8, %6, %out_0 : i64
-    linalg.yield %7, %9 : f32, i64
-  } -> (tensor<1xf32>, tensor<1xi64>)
-  return %4#1 : tensor<1xi64>
-}
-
-//      CHECK-LABEL: func @argmax_2d_f32i64_not_neg_inf_init(
-//      CHECK-NOT: iree_codegen.ukernel.generic
-//      CHECK: linalg.generic
-
-// -----
-
-// TODO: No technical reason this architecture is not supported.
-//       Currently just picking out popular chips to support,
-//       to minimize compile time and space.
-
-func.func @argmax_ukernel_unsupported_arch(%arg0 : tensor<1x?xf32>) -> tensor<1xi64> attributes {
-  hal.executable.target = #hal.executable.target<"rocm", "rocm-hsaco-fb", {ukernels = "all"}>
-} {
-  %c0_i64 = arith.constant 0 : i64
-  %cst = arith.constant 0xFF800000 : f32
-  %0 = tensor.empty() : tensor<1xi64>
-  %1 = linalg.fill ins(%c0_i64 : i64) outs(%0 : tensor<1xi64>) -> tensor<1xi64>
-  %2 = tensor.empty() : tensor<1xf32>
-  %3 = linalg.fill ins(%cst : f32) outs(%2 : tensor<1xf32>) -> tensor<1xf32>
-  %4:2 = linalg.generic {indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0)>, affine_map<(d0, d1) -> (d0)>], iterator_types = ["parallel", "reduction"]} ins(%arg0 : tensor<1x?xf32>) outs(%3, %1 : tensor<1xf32>, tensor<1xi64>) {
-  ^bb0(%in: f32, %out: f32, %out_0: i64):
-    %5 = linalg.index 1 : index
-    %6 = arith.index_cast %5 : index to i64
-    %7 = arith.maximumf %in, %out : f32
-    %8 = arith.cmpf ogt, %in, %out : f32
-    %9 = arith.select %8, %6, %out_0 : i64
-    linalg.yield %7, %9 : f32, i64
-  } -> (tensor<1xf32>, tensor<1xi64>)
-  return %4#1 : tensor<1xi64>
-}
-
-//      CDNA1-LABEL: func @argmax_ukernel_unsupported_arch(
-//      CDNA1-NOT: iree_codegen.ukernel.generic
-//      CDNA1: linalg.generic
+// CHECK-LABEL: func @multi_mma_mfma_i32_16x16x32_i8_one_subgroup_no_shared_memory(
+//       CHECK:   iree_codegen.null_pointer
+//       CHECK:   iree_codegen.ukernel.generic
+//  CHECK-SAME:      "iree_uk_amdgpu_multi_mma_mfma_i32_16x16x32_i8"

@@ -14,6 +14,8 @@ EXPORTS
   ireeCodegenDispatchLoweringPassPipelineAttrGet
   ireeCodegenDispatchLoweringPassPipelineAttrGetTypeID
   ireeCodegenDispatchLoweringPassPipelineAttrGetValue
+  ireeCodegenGetExecutableVariantOps
+  ireeCodegenQueryMMAIntrinsics
   ireeCodegenTranslationInfoAttrGet
   ireeCodegenTranslationInfoAttrGetParameters
   ireeCodegenTranslationInfoAttrGetTypeID
@@ -71,6 +73,9 @@ EXPORTS
   ireeGPULoweringConfigAttrGet
   ireeGPULoweringConfigAttrGetAttributes
   ireeGPULoweringConfigAttrGetTypeID
+  ireeGPULoweringConfigAttrGetTileSizes
+  ireeGPULoweringConfigAttrGetSubgroupCount
+  ireeGPULoweringConfigAttrGetMmaKind
   ireeGPUMMAAttrGet
   ireeGPUMMAAttrGetInfo
   ireeGPUMMAAttrGetTypeID

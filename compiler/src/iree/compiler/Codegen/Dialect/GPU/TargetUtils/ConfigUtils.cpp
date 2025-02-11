@@ -8,6 +8,7 @@
 
 #include "iree/compiler/Codegen/Common/GPU/GPUHeuristics.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
+#include "iree/compiler/Codegen/Dialect/GPU/IR/GPULoweringConfigUtils.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUEnums.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUInterfaces.h"
@@ -31,11 +32,11 @@
 namespace mlir::iree_compiler::IREE::GPU {
 
 constexpr int64_t kCacheLineSizeBits = 128 * 8;
+constexpr int64_t kPreferredCopyNumBits = 128;
 
-LogicalResult
-setDataTiledMultiMmaLoweringConfig(IREE::GPU::TargetAttr target,
-                                   mlir::FunctionOpInterface entryPoint,
-                                   Operation *op) {
+LogicalResult setDataTiledMultiMmaLoweringConfig(
+    IREE::GPU::TargetAttr target, mlir::FunctionOpInterface entryPoint,
+    Operation *op, IREE::GPU::UKernelConfigAttr ukernelConfig) {
   auto multiMmaOp = dyn_cast<IREE::GPU::MultiMmaOp>(op);
   if (!multiMmaOp) {
     return failure();
@@ -69,7 +70,7 @@ setDataTiledMultiMmaLoweringConfig(IREE::GPU::TargetAttr target,
   SmallVector<int64_t> reductionTileSizes(iterationRank, 0);
   for (int64_t kDim : contractionDims.k) {
     workgroupTileSizes[kDim] = 0;
-    reductionTileSizes[kDim] = 1;
+    reductionTileSizes[kDim] = ukernelConfig ? 0 : 1;
   }
 
   // Set tile sizes.
@@ -80,8 +81,16 @@ setDataTiledMultiMmaLoweringConfig(IREE::GPU::TargetAttr target,
                      b.getI64ArrayAttr(workgroupTileSizes));
   attrs.emplace_back(b.getStringAttr("reduction"),
                      b.getI64ArrayAttr(reductionTileSizes));
-  // Promote operands to use shared memory for LHS and RHS.
-  GPU::LoweringConfigAttr::setPromotedOperandList(context, attrs, {0, 1});
+  if (ukernelConfig) {
+    attrs.emplace_back(b.getStringAttr("ukernel"), ukernelConfig);
+  } else {
+    // Promote operands to use shared memory for LHS and RHS.
+    // Don't do that with ukernels: their untiled reduction dimension is too
+    // large to fit in shared memory, so they just want global memory and they
+    // will take care of moving small chunks at a time into a shared memory
+    // operand that will be created together with the ukernel op.
+    GPU::setPromotedOperandList(context, attrs, {0, 1});
+  }
   auto configDict = b.getDictionaryAttr(attrs);
   auto loweringConfig = IREE::GPU::LoweringConfigAttr::get(context, configDict);
 
@@ -107,17 +116,21 @@ setDataTiledMultiMmaLoweringConfig(IREE::GPU::TargetAttr target,
 
 /// Given a target and a matmul problem, try to find an MMA schedule for the
 /// problem based on the available mma intrinsics.
-static std::optional<GPUMMASchedule>
-getMmaScheduleFromProblemAndTarget(IREE::GPU::TargetAttr target,
-                                   GPUMatmulShapeType problem,
-                                   bool transposedLhs, bool transposedRhs) {
+static std::optional<GPUMMASchedule> getMmaScheduleFromProblemAndTarget(
+    IREE::GPU::TargetAttr target, GPUMatmulShapeType problem,
+    bool transposedLhs, bool transposedRhs, bool mustBeAligned = true,
+    bool doCPromotion = false) {
   const int64_t targetSubgroupSize = target.getPreferredSubgroupSize();
   SmallVector<GPUMatmulShapeType> intrinsics;
   for (IREE::GPU::MMAAttr mma : target.getWgp().getMma()) {
-    auto [mSize, nSize, kSize] = mma.getMNKShape();
-    auto [aType, bType, cType] = mma.getABCElementTypes();
+    // Intrinsics that do not specify a scope cannot be distributed.
+    if (failed(mma.getMmaScope()))
+      continue;
     if (mma.getSubgroupSize() != targetSubgroupSize)
       continue;
+
+    auto [mSize, nSize, kSize] = mma.getMNKShape();
+    auto [aType, bType, cType] = mma.getABCElementTypes();
     intrinsics.emplace_back(mSize, nSize, kSize, aType, bType, cType);
   }
   if (intrinsics.empty())
@@ -152,15 +165,10 @@ getMmaScheduleFromProblemAndTarget(IREE::GPU::TargetAttr target,
   int64_t maxSharedMemoryBytes = target.getWgp().getMaxWorkgroupMemoryBytes();
 
   // First try to find a schedule with an exactly matching intrinsic.
-  std::optional<GPUMMASchedule> schedule =
-      deduceMMASchedule(problem, intrinsics, seeds, maxSharedMemoryBytes,
-                        targetSubgroupSize, transposedLhs, transposedRhs);
-  if (!schedule) {
-    // Then try again by allowing upcasting accumulator.
-    schedule = deduceMMASchedule(
-        problem, intrinsics, seeds, maxSharedMemoryBytes, targetSubgroupSize,
-        transposedLhs, transposedRhs, /*canUpcastAcc=*/true);
-  }
+  std::optional<GPUMMASchedule> schedule = deduceMMASchedule(
+      problem, intrinsics, seeds, maxSharedMemoryBytes, targetSubgroupSize,
+      transposedLhs, transposedRhs, /*canUpcastAcc=*/false,
+      /*mustBeAligned*/ mustBeAligned, doCPromotion);
   return schedule;
 }
 
@@ -194,20 +202,26 @@ getMatmulLoweringConfigAndWorkgroupSize(SmallVector<int64_t> bounds,
   // Gather all static M, N, and K dimensions to deduce the MMASchedule. Dynamic
   // dimensions will be tiled to 1 in workgroup tiling, so they are ignored when
   // computing an MMA schedule.
-  SmallVector<int64_t> mDims, nDims, kDims;
-  for (auto mDim : contractionDims.m) {
+  SmallVector<int64_t> mDims, nDims, kDims, batchDims;
+  for (int64_t mDim : contractionDims.m) {
     if (!ShapedType::isDynamic(bounds[mDim])) {
       mDims.push_back(mDim);
     }
   }
-  for (auto nDim : contractionDims.n) {
+  for (int64_t nDim : contractionDims.n) {
     if (!ShapedType::isDynamic(bounds[nDim])) {
       nDims.push_back(nDim);
     }
   }
-  for (auto kDim : contractionDims.k) {
+  for (int64_t kDim : contractionDims.k) {
     if (!ShapedType::isDynamic(bounds[kDim])) {
       kDims.push_back(kDim);
+    }
+  }
+
+  for (int64_t batchDim : contractionDims.batch) {
+    if (!ShapedType::isDynamic(bounds[batchDim])) {
+      batchDims.push_back(batchDim);
     }
   }
 
@@ -225,8 +239,9 @@ getMatmulLoweringConfigAndWorkgroupSize(SmallVector<int64_t> bounds,
   Type initElemType = getElementTypeOrSelf(init);
 
   GPUMatmulShapeType problem{getDimBounds(mDims), getDimBounds(nDims),
-                             getDimBounds(kDims), lhsElemType,
-                             rhsElemType,         initElemType};
+                             getDimBounds(kDims), getDimBounds(batchDims),
+                             lhsElemType,         rhsElemType,
+                             initElemType};
 
   // Infer if lhs or rhs is transposed to help generate better schedule.
   // TODO: Drop this. This is only a consideration for other pipelines.
@@ -237,8 +252,23 @@ getMatmulLoweringConfigAndWorkgroupSize(SmallVector<int64_t> bounds,
       nDims.back() !=
       llvm::cast<AffineDimExpr>(maps[1].getResults().back()).getPosition();
 
+  bool mustBeAligned = true;
+  bool doCPromotion = false;
   std::optional<GPUMMASchedule> schedule = getMmaScheduleFromProblemAndTarget(
       target, problem, transposedLhs, transposedRhs);
+
+  // TODO (nirvedhmeshram, qedawkins): The performance with this will be bad if
+  // the GEMM is accumulating (i.e doesnt have a zero fill dpsInit) as that
+  // buffer currently gets materialized as private memory. We need to add
+  // missing patterns to fix that.
+  if (!schedule) {
+    LDBG("Attempting to deduce unaligned TileAndFuse MMA schedulee");
+    mustBeAligned = false;
+    doCPromotion = true;
+    schedule = getMmaScheduleFromProblemAndTarget(target, problem,
+                                                  transposedLhs, transposedRhs,
+                                                  mustBeAligned, doCPromotion);
+  }
 
   if (!schedule) {
     LDBG("Failed to deduce TileAndFuse MMA schedule");
@@ -268,14 +298,6 @@ getMatmulLoweringConfigAndWorkgroupSize(SmallVector<int64_t> bounds,
   for (int64_t k : llvm::drop_end(contractionDims.k)) {
     reductionTileSizes[k] = 1;
   }
-
-  // Adjust the inner bound size for packing to intrinsic shapes, since tiling
-  // happens after packing.
-  assert(bounds[mDims.back()] % schedule->mSize == 0 &&
-         bounds[nDims.back()] % schedule->nSize == 0 &&
-         "expected inner bound to be evenly divisible by schedule sizes.");
-  bounds[mDims.back()] /= schedule->mSize;
-  bounds[nDims.back()] /= schedule->nSize;
 
   // Compute the M/N dimension tile sizes by multiplying subgroup information.
   for (auto [i, mDim] : llvm::enumerate(mDims)) {
@@ -317,7 +339,26 @@ getMatmulLoweringConfigAndWorkgroupSize(SmallVector<int64_t> bounds,
   attrs.emplace_back(StringAttr::get(context, "subgroup"),
                      b.getI64ArrayAttr(subgroupTileSizes));
   attrs.emplace_back(StringAttr::get(context, "mma_kind"), mmaKind);
-  GPU::LoweringConfigAttr::setPromotedOperandList(context, attrs, {0, 1});
+  if (mustBeAligned) {
+    GPU::setPromotedOperandList(context, attrs, {0, 1});
+  } else {
+    // TODO (nirvedhmeshram, Max191, jerryyin) : Add support so that unaligned
+    // shapes do not require c promotion.
+    GPU::setPromotedOperandList(context, attrs, {0, 1, 2});
+    SmallVector<int64_t> paddingTileSizes = workgroupTileSizes;
+
+    // Initialize inner and outer padding sizes from reductionTileSizes.
+    for (int64_t kDim : kDims) {
+      paddingTileSizes[kDim] = reductionTileSizes[kDim];
+    }
+
+    int64_t innerKDim = contractionDims.k.back();
+    int64_t kPackFactor = std::get<2>(mmaKind.getMNKShape());
+    paddingTileSizes[innerKDim] *= kPackFactor;
+
+    attrs.emplace_back(StringAttr::get(context, "padding"),
+                       b.getI64ArrayAttr(paddingTileSizes));
+  }
   auto configDict = DictionaryAttr::get(context, attrs);
   auto loweringConfig = IREE::GPU::LoweringConfigAttr::get(context, configDict);
   int64_t flatWorkgroupSize =
@@ -341,22 +382,22 @@ setIGEMMConvolutionLoweringConfig(IREE::GPU::TargetAttr target,
     return failure();
 
   LDBG("IGEMM TileAndFuse Config");
-  FailureOr<SmallVector<AffineMap>> igemmContractionMaps =
-      LinalgExt::getIGEMMContractionIndexingMaps(linalgOp);
-  FailureOr<SmallVector<int64_t>> igemmLoopBounds =
-      LinalgExt::getIGEMMLoopBounds(linalgOp);
-  FailureOr<SmallVector<Value>> igemmOperands =
-      LinalgExt::getIGEMMOperands(linalgOp);
-  if (failed(igemmContractionMaps) || failed(igemmLoopBounds) ||
-      failed(igemmOperands)) {
+  FailureOr<LinalgExt::IGEMMGenericConvDetails> igemmGenericConvDetails =
+      LinalgExt::getIGEMMGenericConvDetails(linalgOp);
+  if (failed(igemmGenericConvDetails)) {
     LDBG("Unsupported convolution type");
     return failure();
   }
+  SmallVector<AffineMap> igemmContractionMaps =
+      igemmGenericConvDetails->igemmContractionMaps;
+  SmallVector<int64_t> igemmLoopBounds =
+      igemmGenericConvDetails->igemmLoopBounds;
+  SmallVector<Value> igemmOperands = igemmGenericConvDetails->igemmOperands;
 
-  SmallVector<int64_t> bounds = igemmLoopBounds.value();
+  SmallVector<int64_t> bounds = igemmLoopBounds;
   FailureOr<std::pair<LoweringConfigAttr, int64_t>> configAndWgSize =
-      getMatmulLoweringConfigAndWorkgroupSize(
-          bounds, igemmContractionMaps.value(), igemmOperands.value(), target);
+      getMatmulLoweringConfigAndWorkgroupSize(bounds, igemmContractionMaps,
+                                              igemmOperands, target);
   if (failed(configAndWgSize)) {
     return failure();
   }
@@ -508,11 +549,10 @@ LogicalResult setTileAndFuseLoweringConfig(IREE::GPU::TargetAttr target,
                    [](AffineMap map) { return map.isProjectedPermutation(); });
   bool powTwo =
       llvm::all_of(linalgOp->getOperands(), elementHasPowerOfTwoBitwidth);
-  bool staticShape = llvm::none_of(loopBounds, ShapedType::isDynamic);
 
   // Require all affine maps to be projected permutation so that we can
   // generate vector transfer ops.
-  bool vectorizable = projPerm && powTwo && staticShape;
+  bool vectorizable = projPerm && powTwo;
 
   const unsigned minBitwidth = getMinElementBitwidth(linalgOp);
   // Make sure we use a tile size that results in some integral number of bytes.
@@ -657,7 +697,7 @@ LogicalResult setTileAndFuseLoweringConfig(IREE::GPU::TargetAttr target,
                      b.getI64ArrayAttr(threadTileSizes));
 
   if (isNonMatvecContraction(linalgOp)) {
-    GPU::LoweringConfigAttr::setPromotedOperandList(context, attrs, {0, 1});
+    GPU::setPromotedOperandList(context, attrs, {0, 1});
   }
 
   // Heuristic value chosen to limit maximum vector sizes when tiling below.
@@ -701,6 +741,115 @@ LogicalResult setTileAndFuseLoweringConfig(IREE::GPU::TargetAttr target,
       entryPoint, op, loweringConfig,
       IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUTileAndFuse,
       {flatWorkgroupSize, 1, 1}, subgroupSize, DictionaryAttr());
+}
+
+LogicalResult setScatterLoweringConfig(IREE::GPU::TargetAttr target,
+                                       mlir::FunctionOpInterface entryPoint,
+                                       Operation *op) {
+  auto scatter = dyn_cast<IREE::LinalgExt::ScatterOp>(op);
+  if (!scatter) {
+    return failure();
+  }
+
+  // TODO: Support non-unique indices.
+  if (!scatter.getUniqueIndices()) {
+    return failure();
+  }
+
+  // Various problem parameters.
+  int64_t loopDepth = scatter.getLoopIteratorTypes().size();
+  int64_t elemBits = scatter.getOriginalType().getElementTypeBitWidth();
+  SmallVector<int64_t> loopBounds = scatter.getStaticLoopRanges().value_or(
+      SmallVector<int64_t>(loopDepth, ShapedType::kDynamic));
+
+  // Configurations we need to decide.
+  int64_t flatWorkgroupSize = target.getPreferredSubgroupSize();
+  SmallVector<int64_t> workgroupTileSizes(loopDepth, 1);
+  SmallVector<int64_t> threadTileSizes(loopDepth, 1);
+  int64_t vectorSize = kPreferredCopyNumBits / elemBits;
+
+  bool innerDynamic = ShapedType::isDynamic(loopBounds.back());
+
+  // Do not bother trying to vectorize if there are no vectorizable dims.
+  if (loopDepth == 1) {
+    vectorSize = 1;
+  } else if (!innerDynamic) {
+    // Use the largest power of 2 that divides the inner most non-scattered dim.
+    vectorSize = std::gcd(vectorSize, loopBounds.back());
+  }
+
+  threadTileSizes.back() = vectorSize;
+  int64_t residualInnerSize =
+      innerDynamic ? loopBounds.back() : loopBounds.back() / vectorSize;
+
+  // If the inner most dim is dynamic or exceeds the expected number of threads,
+  // Only distribute threads along the inner most dimension.
+  if (ShapedType::isDynamic(residualInnerSize) ||
+      residualInnerSize >= flatWorkgroupSize) {
+    workgroupTileSizes.back() = vectorSize * flatWorkgroupSize;
+  } else { // residualInnerSize < flatWorkgroupSize
+    // Floordiv to overestimate the required number of threads.
+    int64_t residualThreads = flatWorkgroupSize / residualInnerSize;
+    workgroupTileSizes.back() = residualInnerSize * vectorSize;
+    for (int64_t i = loopDepth - 2, e = 0; i >= e; --i) {
+      if (residualThreads <= 1) {
+        break;
+      }
+
+      bool dynamicDim = ShapedType::isDynamic(loopBounds[i]);
+      workgroupTileSizes[i] = dynamicDim
+                                  ? residualThreads
+                                  : std::min(residualThreads, loopBounds[i]);
+      residualThreads = dynamicDim ? 1 : residualThreads / loopBounds[i];
+    }
+  }
+
+  int64_t numBatch = scatter.getBatchRank();
+  // Currently bufferization will fail if the only dimension distributed to
+  // workgroups is the batch dims because the workgroup level slice will fold
+  // away and cause a mismatch. To work around this we ensure that at least one
+  // inner dim is always at least partially distributed to workgroups.
+  if (llvm::all_of_zip(llvm::drop_begin(workgroupTileSizes, numBatch),
+                       llvm::drop_begin(loopBounds, numBatch),
+                       [](int64_t tileSize, int64_t bound) {
+                         return tileSize == bound || tileSize == 0;
+                       })) {
+    bool hasNonUnitInnerSlice = false;
+    for (int i = numBatch, e = loopDepth; i < e; ++i) {
+      if (workgroupTileSizes[i] > 1) {
+        workgroupTileSizes[i] /= 2;
+        hasNonUnitInnerSlice = true;
+        break;
+      }
+    }
+    // If the inner most slice is a single element then we have to bail out.
+    // TODO: Support this case.
+    if (!hasNonUnitInnerSlice) {
+      return failure();
+    }
+  }
+
+  // Attach the MMA schedule as an attribute to the entry point export function
+  // for later access in the pipeline.
+  MLIRContext *context = scatter.getContext();
+  SmallVector<NamedAttribute, 1> attrs;
+  Builder b(context);
+  attrs.emplace_back(StringAttr::get(context, "workgroup"),
+                     b.getI64ArrayAttr(workgroupTileSizes));
+
+  attrs.emplace_back(StringAttr::get(context, "thread"),
+                     b.getI64ArrayAttr(threadTileSizes));
+
+  auto configDict = DictionaryAttr::get(context, attrs);
+  auto loweringConfig = IREE::GPU::LoweringConfigAttr::get(context, configDict);
+
+  LDBG("Selected tile and fuse lowering config: " << loweringConfig << "\n");
+
+  // TODO(qedawkins): Use a shared pipeline identifier here.
+  return setOpConfigAndEntryPointFnTranslation(
+      entryPoint, scatter, loweringConfig,
+      IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUTileAndFuse,
+      {flatWorkgroupSize, 1, 1}, flatWorkgroupSize, DictionaryAttr());
 }
 
 //===----------------------------------------------------------------------===//

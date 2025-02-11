@@ -86,8 +86,8 @@ TEST_F(BufferMappingTest, ZeroWholeBuffer) {
   AllocateUninitializedBuffer(kDefaultAllocationSize, &buffer);
 
   // Zero the entire buffer.
-  IREE_ASSERT_OK(
-      iree_hal_buffer_map_zero(buffer, /*byte_offset=*/0, IREE_WHOLE_BUFFER));
+  IREE_ASSERT_OK(iree_hal_buffer_map_zero(buffer, /*byte_offset=*/0,
+                                          IREE_HAL_WHOLE_BUFFER));
 
   // Check that the contents match what we expect.
   std::vector<uint8_t> actual_data(kDefaultAllocationSize);
@@ -108,7 +108,7 @@ TEST_F(BufferMappingTest, ZeroWithOffset) {
   // Fill the entire buffer then zero only a segment of it.
   uint8_t fill_value = 0xFF;
   IREE_ASSERT_OK(iree_hal_buffer_map_fill(buffer, /*byte_offset=*/0,
-                                          IREE_WHOLE_BUFFER, &fill_value,
+                                          IREE_HAL_WHOLE_BUFFER, &fill_value,
                                           sizeof(fill_value)));
   IREE_ASSERT_OK(
       iree_hal_buffer_map_zero(buffer, /*byte_offset=*/4, /*byte_length=*/8));
@@ -134,14 +134,15 @@ TEST_F(BufferMappingTest, ZeroSubspan) {
   // Fill the entire buffer.
   uint8_t fill_value = 0xFF;
   IREE_ASSERT_OK(iree_hal_buffer_map_fill(buffer, /*byte_offset=*/0,
-                                          IREE_WHOLE_BUFFER, &fill_value,
+                                          IREE_HAL_WHOLE_BUFFER, &fill_value,
                                           sizeof(fill_value)));
 
   // Create a subspan.
   iree_device_size_t subspan_length = 8;
   iree_hal_buffer_t* buffer_subspan = NULL;
-  IREE_ASSERT_OK(iree_hal_buffer_subspan(buffer, /*byte_offset=*/4,
-                                         subspan_length, &buffer_subspan));
+  IREE_ASSERT_OK(
+      iree_hal_buffer_subspan(buffer, /*byte_offset=*/4, subspan_length,
+                              iree_allocator_system(), &buffer_subspan));
 
   // Zero part of the subspan.
   IREE_ASSERT_OK(iree_hal_buffer_map_zero(buffer_subspan, /*byte_offset=*/4,
@@ -174,7 +175,7 @@ TEST_F(BufferMappingTest, FillEmpty) {
   AllocateUninitializedBuffer(kDefaultAllocationSize, &buffer);
 
   // Zero the whole buffer then "fill" 0 bytes with a different pattern.
-  IREE_ASSERT_OK(iree_hal_buffer_map_zero(buffer, 0, IREE_WHOLE_BUFFER));
+  IREE_ASSERT_OK(iree_hal_buffer_map_zero(buffer, 0, IREE_HAL_WHOLE_BUFFER));
   uint8_t fill_value = 0xFF;
   IREE_ASSERT_OK(
       iree_hal_buffer_map_fill(buffer, /*byte_offset=*/0,
@@ -200,7 +201,7 @@ TEST_F(BufferMappingTest, FillWholeBuffer) {
   uint8_t fill_value = 0xFF;
   IREE_ASSERT_OK(
       iree_hal_buffer_map_fill(buffer, /*byte_offset=*/0,
-                               /*byte_length=*/IREE_WHOLE_BUFFER,
+                               /*byte_length=*/IREE_HAL_WHOLE_BUFFER,
                                /*pattern=*/&fill_value,
                                /*pattern_length=*/sizeof(fill_value)));
 
@@ -221,7 +222,7 @@ TEST_F(BufferMappingTest, FillWithOffset) {
   AllocateUninitializedBuffer(buffer_size, &buffer);
 
   // Zero the entire buffer then fill only a segment of it.
-  IREE_ASSERT_OK(iree_hal_buffer_map_zero(buffer, 0, IREE_WHOLE_BUFFER));
+  IREE_ASSERT_OK(iree_hal_buffer_map_zero(buffer, 0, IREE_HAL_WHOLE_BUFFER));
   uint8_t fill_value = 0xFF;
   IREE_ASSERT_OK(
       iree_hal_buffer_map_fill(buffer, /*byte_offset=*/4,
@@ -248,13 +249,14 @@ TEST_F(BufferMappingTest, FillSubspan) {
   AllocateUninitializedBuffer(buffer_size, &buffer);
 
   // Zero the entire buffer.
-  IREE_ASSERT_OK(iree_hal_buffer_map_zero(buffer, 0, IREE_WHOLE_BUFFER));
+  IREE_ASSERT_OK(iree_hal_buffer_map_zero(buffer, 0, IREE_HAL_WHOLE_BUFFER));
 
   // Create a subspan.
   iree_device_size_t subspan_length = 8;
   iree_hal_buffer_t* buffer_subspan = NULL;
-  IREE_ASSERT_OK(iree_hal_buffer_subspan(buffer, /*byte_offset=*/4,
-                                         subspan_length, &buffer_subspan));
+  IREE_ASSERT_OK(
+      iree_hal_buffer_subspan(buffer, /*byte_offset=*/4, subspan_length,
+                              iree_allocator_system(), &buffer_subspan));
 
   // Fill part of the subspan.
   uint8_t fill_value = 0xFF;
@@ -342,8 +344,9 @@ TEST_F(BufferMappingTest, ReadDataSubspan) {
   // Create a subspan.
   iree_device_size_t subspan_length = 8;
   iree_hal_buffer_t* buffer_subspan = NULL;
-  IREE_ASSERT_OK(iree_hal_buffer_subspan(buffer, /*byte_offset=*/4,
-                                         subspan_length, &buffer_subspan));
+  IREE_ASSERT_OK(
+      iree_hal_buffer_subspan(buffer, /*byte_offset=*/4, subspan_length,
+                              iree_allocator_system(), &buffer_subspan));
 
   // Read the entire buffer subspan.
   std::vector<uint8_t> actual_data(subspan_length);
@@ -394,7 +397,7 @@ TEST_F(BufferMappingTest, WriteDataWithOffset) {
   AllocateUninitializedBuffer(buffer_size, &buffer);
 
   // Zero the entire buffer.
-  IREE_ASSERT_OK(iree_hal_buffer_map_zero(buffer, 0, IREE_WHOLE_BUFFER));
+  IREE_ASSERT_OK(iree_hal_buffer_map_zero(buffer, 0, IREE_HAL_WHOLE_BUFFER));
 
   // Write over part of the buffer.
   std::vector<uint8_t> fill_buffer{0x11, 0x22, 0x33, 0x44,  //
@@ -421,13 +424,14 @@ TEST_F(BufferMappingTest, WriteDataSubspan) {
   AllocateUninitializedBuffer(buffer_size, &buffer);
 
   // Zero the entire buffer.
-  IREE_ASSERT_OK(iree_hal_buffer_map_zero(buffer, 0, IREE_WHOLE_BUFFER));
+  IREE_ASSERT_OK(iree_hal_buffer_map_zero(buffer, 0, IREE_HAL_WHOLE_BUFFER));
 
   // Create a subspan.
   iree_device_size_t subspan_length = 8;
   iree_hal_buffer_t* buffer_subspan = NULL;
-  IREE_ASSERT_OK(iree_hal_buffer_subspan(buffer, /*byte_offset=*/4,
-                                         subspan_length, &buffer_subspan));
+  IREE_ASSERT_OK(
+      iree_hal_buffer_subspan(buffer, /*byte_offset=*/4, subspan_length,
+                              iree_allocator_system(), &buffer_subspan));
 
   // Write over part of the subspan.
   std::vector<uint8_t> fill_buffer{0x11, 0x22, 0x33, 0x44};
@@ -495,7 +499,7 @@ TEST_F(BufferMappingTest, MapRangeRead) {
 
   uint8_t fill_value = 0xEF;
   IREE_ASSERT_OK(iree_hal_buffer_map_fill(buffer, /*byte_offset=*/0,
-                                          IREE_WHOLE_BUFFER, &fill_value,
+                                          IREE_HAL_WHOLE_BUFFER, &fill_value,
                                           sizeof(fill_value)));
 
   iree_hal_buffer_mapping_t mapping;

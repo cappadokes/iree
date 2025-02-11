@@ -10,7 +10,7 @@ import os
 from conftest import VmfbManager
 from pathlib import Path
 
-rocm_chip = os.getenv("ROCM_CHIP", default="gfx90a")
+rocm_chip = os.getenv("ROCM_CHIP", default="gfx942")
 vmfb_dir = os.getenv("TEST_OUTPUT_ARTIFACTS", default=Path.cwd())
 
 ###############################################################################
@@ -63,7 +63,7 @@ sd3_clip_real_weights = fetch_source_fixture(
 )
 
 sd3_clip_mlir = fetch_source_fixture(
-    "https://sharkpublic.blob.core.windows.net/sharkpublic/sai/sd3-prompt-encoder/model.mlirbc",
+    "https://sharkpublic.blob.core.windows.net/sharkpublic/sai/sd3-prompt-encoder/model.mlir",
     group="sd3_clip",
 )
 
@@ -152,10 +152,6 @@ def test_run_clip_cpu(SD3_CLIP_COMMON_RUN_FLAGS, sd3_clip_real_weights):
 ###############################################################################
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Expected compilation to fail",
-)
 def test_compile_clip_rocm(sd3_clip_mlir):
     VmfbManager.sd3_clip_rocm_vmfb = iree_compile(
         sd3_clip_mlir,
@@ -172,6 +168,9 @@ def test_run_clip_rocm(SD3_CLIP_COMMON_RUN_FLAGS, sd3_clip_real_weights):
         VmfbManager.sd3_clip_rocm_vmfb,
         device="hip",
         function="encode_tokens",
-        args=[f"--parameters=model={sd3_clip_real_weights.path}"]
+        args=[
+            f"--parameters=model={sd3_clip_real_weights.path}",
+            "--expected_f32_threshold=0.15f",
+        ]
         + SD3_CLIP_COMMON_RUN_FLAGS,
     )

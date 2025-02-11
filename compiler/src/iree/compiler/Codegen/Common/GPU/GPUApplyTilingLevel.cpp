@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "iree/compiler/Codegen/Common/GPU/Passes.h"
+#include "iree/compiler/Codegen/Common/Transforms.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenInterfaces.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
@@ -17,11 +18,13 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Tensor/Transforms/Transforms.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Interfaces/TilingInterface.h"
+#include "mlir/Interfaces/ValueBoundsOpInterface.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #define DEBUG_TYPE "iree-codegen-gpu-apply-tiling-level"
@@ -127,6 +130,12 @@ static LogicalResult applyTileAndFuseToEachRoot(
       tilingOptions.setMapping(llvm::to_vector(llvm::reverse(mapping)));
     }
 
+    if (tilingLevel == IREE::GPU::TilingLevel::PartialReduction) {
+      tilingOptions.setReductionTilingStrategy(
+          scf::SCFTilingOptions::ReductionTilingStrategy::
+              PartialReductionOuterReduction);
+    }
+
     scf::SCFTileAndFuseOptions tileAndFuseOptions;
     tileAndFuseOptions.setTilingOptions(tilingOptions);
 
@@ -136,6 +145,7 @@ static LogicalResult applyTileAndFuseToEachRoot(
         -> std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> {
       Operation *owner = originalProducer.getOwner();
       if (tilingLevel == IREE::GPU::TilingLevel::Reduction ||
+          tilingLevel == IREE::GPU::TilingLevel::PartialReduction ||
           tilingLevel == IREE::GPU::TilingLevel::Subgroup) {
         // Do not fuse pad in reduction and subgroup tiling. We instead fuse
         // pad without zero slice guard as a cleanup pattern.
@@ -143,15 +153,20 @@ static LogicalResult applyTileAndFuseToEachRoot(
           return std::nullopt;
         }
       }
-
-      bool yieldProducerReplacement = yieldReplacementsFor.contains(owner);
+      bool yieldProducerReplacement = false;
+      // We dont want this for reduction tiling as it can lead to large tensors
+      // being yielded.
+      if (tilingLevel != IREE::GPU::TilingLevel::Reduction &&
+          tilingLevel != IREE::GPU::TilingLevel::PartialReduction)
+        yieldProducerReplacement = yieldReplacementsFor.contains(owner);
       bool shouldFuse = false;
       if (auto tilingOwner = dyn_cast<TilingInterface>(owner)) {
         shouldFuse = !payloadOps.contains(tilingOwner);
       }
       // Do not fuse destination operands for reduction tiling.
       if (isDestinationOperand &&
-          tilingLevel == IREE::GPU::TilingLevel::Reduction) {
+          (tilingLevel == IREE::GPU::TilingLevel::Reduction ||
+           tilingLevel == IREE::GPU::TilingLevel::PartialReduction)) {
         shouldFuse = false;
       }
       if (shouldFuse) {
@@ -175,6 +190,18 @@ static LogicalResult applyTileAndFuseToEachRoot(
           context, zeroSliceGuard);
     }
 
+    // Avoid cleanup for subgroup level tiling because cleanup/fusion must
+    // happen later during lane tiling because failure to fuse at the lane
+    // tiling level is irrecoverable if fusion happens now.
+    if (tilingLevel != IREE::GPU::TilingLevel::Subgroup) {
+      tensor::ExtractSliceOp::getCanonicalizationPatterns(cleanupPatterns,
+                                                          context);
+      tensor::DimOp::getCanonicalizationPatterns(cleanupPatterns, context);
+      tensor::populateMergeConsecutiveInsertExtractSlicePatterns(
+          cleanupPatterns);
+      populateSwapExtractWithExpandPattern(cleanupPatterns);
+    }
+
     tileAndFuseOptions.cleanupPatterns =
         FrozenRewritePatternSet(std::move(cleanupPatterns));
 
@@ -183,6 +210,13 @@ static LogicalResult applyTileAndFuseToEachRoot(
                                                   tileAndFuseOptions);
     if (failed(tiledResults)) {
       return failure();
+    }
+
+    if (IREE::Codegen::LoweringConfigAttrInterface originalConfig =
+            getLoweringConfig(tilingInterfaceOp)) {
+      if (!tiledResults->tiledAndFusedOps.empty()) {
+        setLoweringConfig(tiledResults->tiledAndFusedOps[0], originalConfig);
+      }
     }
 
     // Perform the replacement of tiled and fused values.
@@ -228,7 +262,8 @@ void GPUApplyTilingLevelPass::runOnOperation() {
 
   if (tilingLevel != IREE::GPU::TilingLevel::Reduction &&
       tilingLevel != IREE::GPU::TilingLevel::Thread &&
-      tilingLevel != IREE::GPU::TilingLevel::Subgroup) {
+      tilingLevel != IREE::GPU::TilingLevel::Subgroup &&
+      tilingLevel != IREE::GPU::TilingLevel::PartialReduction) {
     funcOp.emitError() << "unsupported tiling level: "
                        << IREE::GPU::stringifyEnum(tilingLevel) << "\n";
     return signalPassFailure();
@@ -257,7 +292,7 @@ void GPUApplyTilingLevelPass::runOnOperation() {
     tensor::InsertSliceOp::getCanonicalizationPatterns(patterns, context);
     tensor::ExtractSliceOp::getCanonicalizationPatterns(patterns, context);
     scf::ForOp::getCanonicalizationPatterns(patterns, context);
-    if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
       funcOp.emitError() << "tiling cleanup failed\n";
       return signalPassFailure();
     }

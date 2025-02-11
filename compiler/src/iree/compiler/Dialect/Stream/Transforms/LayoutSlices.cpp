@@ -10,7 +10,6 @@
 #include "iree/compiler/Dialect/Stream/IR/StreamOps.h"
 #include "iree/compiler/Dialect/Stream/IR/StreamTypes.h"
 #include "iree/compiler/Dialect/Stream/Transforms/Passes.h"
-#include "iree/compiler/Dialect/Stream/Transforms/RusToy.h"
 #include "iree/compiler/Dialect/Util/IR/UtilDialect.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
@@ -30,7 +29,6 @@ namespace mlir::iree_compiler::IREE::Stream {
 
 #define GEN_PASS_DEF_LAYOUTSLICESPASS
 #include "iree/compiler/Dialect/Stream/Transforms/Passes.h.inc"
-#include <cstdio>
 
 namespace {
 
@@ -59,17 +57,6 @@ packStaticSlicesGreedily(IREE::Stream::ResourcePackOp packOp, Value baseOffset,
                          MutableArrayRef<Slice> slices,
                          IREE::Stream::ResourceConfigAttr resourceConfig,
                          IndexSet &indexSet, OpBuilder &builder) {
-  // RUST INTEGRATION INIT START
-  // ---------------------------
-
-  // `Slice` is defined in Stream/IR/StreamOps.td
-  // `UnplacedSlice` is an almost-copy of `Slice`, defined in Stream/Transforms/RusToy.h
-  // The `trojan` vector will carry all slices over the FFI
-  std::vector<UnplacedSlice> trojan;
-
-  //--------------------------
-  // RUST INTEGRATION INIT END
-
   int64_t offsetAlignment = resourceConfig.getMinBufferOffsetAlignment();
   int64_t rangeAlignment = resourceConfig.getMinBufferRangeAlignment();
 
@@ -78,48 +65,48 @@ packStaticSlicesGreedily(IREE::Stream::ResourcePackOp packOp, Value baseOffset,
     int64_t staticOffset = 0;
     int64_t staticSize = 0;
   };
+  static constexpr int64_t UNASSIGNED = INT64_MAX;
 
   std::list<Reservation> reservations;
   int64_t highwaterMark = 0;
-
-  // We shall iterate over the slices twice: the first time,
-  // we create a vector to be passed over to Rust.
   for (auto &slice : slices) {
+    int64_t bestOffset = UNASSIGNED;
+    int64_t bestOffsetFit = UNASSIGNED;
     int64_t staticSize =
         cast<arith::ConstantIndexOp>(slice.dynamicSize.getDefiningOp()).value();
     int64_t alignedSize = IREE::Util::align(staticSize, rangeAlignment);
 
-    // RUST INTEGRATION BODY START
-    // ---------------------------
+    // Iterate through reservations (sorted by ascending offset) and identify
+    // gaps in which the slice will fit. To reduce wastage we want to find the
+    // smallest gap.
+    int64_t currentOffset = 0;
+    for (auto &reservation : reservations) {
+      if (!reservation.slice->intersects(slice)) {
+        // Non-overlapping - we can reuse the currentOffset (assuming we find
+        // no better place).
+        continue;
+      }
 
-    // `UnplacedSlice` is a "shared" type, i.e.,
-    // usable by CPP.
-    UnplacedSlice ps;
-    ps.start = slice.lifetimeStart;
-    ps.end = slice.lifetimeEnd;
-    ps.size = alignedSize;
-    ps.align = offsetAlignment;
-    trojan.push_back(ps);
-    // ---------------------------
-    // RUST INTEGRATION BODY END
-  }
-
-  // Runs idealloc. Offset at index i of the returned vector
-  // must be given to the i-th Slice.
-  rust::cxxbridge1::Vec<int64_t> offsets = place_slices(trojan);
-  size_t i = 0;
-
-  for (auto &slice : slices) {
-    int64_t bestOffset = offsets[i];
-    int64_t alignedSize = trojan[i].size;
+      // If we found a gap >= the required size and smaller than
+      // previous best fit take it.
+      int64_t alignedOffset = IREE::Util::align(currentOffset, offsetAlignment);
+      if (alignedOffset + alignedSize <= reservation.staticOffset &&
+          reservation.staticOffset - alignedOffset < bestOffsetFit) {
+        bestOffset = alignedOffset;
+        bestOffsetFit = reservation.staticOffset - currentOffset;
+      }
+      currentOffset = std::max(currentOffset, reservation.staticOffset +
+                                                  reservation.staticSize);
+    }
+    if (bestOffset == UNASSIGNED) {
+      bestOffset = IREE::Util::align(currentOffset, offsetAlignment);
+    }
 
     // Reserve the memory.
     Reservation reservation;
     reservation.slice = &slice;
     reservation.staticOffset = bestOffset;
     reservation.staticSize = alignedSize;
-
-
     auto insertionIt = reservations.begin();
     while (insertionIt != reservations.end() &&
            insertionIt->staticOffset < reservation.staticOffset) {
@@ -132,11 +119,9 @@ packStaticSlicesGreedily(IREE::Stream::ResourcePackOp packOp, Value baseOffset,
     // Update highwater mark indicating how much memory needs to be allocated
     // for the entire slab.
     highwaterMark = std::max(highwaterMark, bestOffset + alignedSize);
-    i += 1;
   }
 
   highwaterMark = IREE::Util::align(highwaterMark, rangeAlignment);
-
   return builder.createOrFold<arith::AddIOp>(packOp.getLoc(), baseOffset,
                                              indexSet.get(highwaterMark));
 }

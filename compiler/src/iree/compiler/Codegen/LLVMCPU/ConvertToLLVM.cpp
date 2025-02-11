@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "iree/compiler/Codegen/Common/PassUtils.h"
+#include "iree/compiler/Codegen/Common/Transforms.h"
 #include "iree/compiler/Codegen/LLVMCPU/DispatchABI.h"
 #include "iree/compiler/Codegen/LLVMCPU/Passes.h"
 #include "iree/compiler/Codegen/LLVMCPU/Utils.h"
@@ -161,8 +162,10 @@ struct ConvertHALEntryPointFuncOp
     // can use the attributes.
     // (%arg0: environment, %arg1: dispatch_state, %arg2: workgroup_state)
     for (unsigned i = 0; i <= 2; ++i) {
-      llvmFuncOp.setArgAttr(i, LLVM::LLVMDialect::getNoAliasAttrName(),
-                            rewriter.getUnitAttr());
+      Attribute unit = rewriter.getUnitAttr();
+      llvmFuncOp.setArgAttr(i, LLVM::LLVMDialect::getNoAliasAttrName(), unit);
+      llvmFuncOp.setArgAttr(i, LLVM::LLVMDialect::getNonNullAttrName(), unit);
+      llvmFuncOp.setArgAttr(i, LLVM::LLVMDialect::getNoUndefAttrName(), unit);
       llvmFuncOp.setArgAttr(i, LLVM::LLVMDialect::getAlignAttrName(),
                             rewriter.getI64IntegerAttr(16));
     }
@@ -981,8 +984,7 @@ void ConvertToLLVMPass::runOnOperation() {
     vector::populateVectorTransposeLoweringPatterns(
         patterns, vector::VectorTransformsOptions());
     populateConvertArmNeon2dToIntrPatterns(patterns);
-    if (failed(applyPatternsAndFoldGreedily(getOperation(),
-                                            std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       return signalPassFailure();
     }
   }
@@ -990,8 +992,8 @@ void ConvertToLLVMPass::runOnOperation() {
     RewritePatternSet vectorToLoopsPatterns(&getContext());
     populateVectorToSCFConversionPatterns(
         vectorToLoopsPatterns, VectorTransferToSCFOptions().enableFullUnroll());
-    if (failed(applyPatternsAndFoldGreedily(
-            getOperation(), std::move(vectorToLoopsPatterns)))) {
+    if (failed(applyPatternsGreedily(getOperation(),
+                                     std::move(vectorToLoopsPatterns)))) {
       return signalPassFailure();
     }
   }
@@ -1038,7 +1040,9 @@ void ConvertToLLVMPass::runOnOperation() {
 
   populateComplexToLLVMConversionPatterns(typeConverter, patterns);
   populateMathToLLVMConversionPatterns(typeConverter, patterns);
+  // Note: workaround needed due to `memref.subview` returnd from an `if`.
   memref::populateExpandStridedMetadataPatterns(patterns);
+  iree_compiler::populateIREEResolveExtractStridedMetadataPatterns(patterns);
   populateFinalizeMemRefToLLVMConversionPatterns(typeConverter, patterns);
   populateFuncToLLVMConversionPatterns(typeConverter, patterns);
   arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
@@ -1049,8 +1053,13 @@ void ConvertToLLVMPass::runOnOperation() {
   // unroll them to 1-D before converting to the LLVM dialect.
   vector::populateVectorBitCastLoweringPatterns(patterns);
   populateVectorToLLVMMatrixConversionPatterns(typeConverter, patterns);
+  vector::populateVectorRankReducingFMAPattern(patterns);
+  vector::populateVectorInsertExtractStridedSliceTransforms(patterns);
+  vector::populateVectorStepLoweringPatterns(patterns);
   populateVectorToLLVMConversionPatterns(typeConverter, patterns,
                                          reassociateFpReductions);
+  vector::populateVectorTransferLoweringPatterns(patterns,
+                                                 /*maxTransferRank=*/1);
 
   if (isAArch64(targetAttr) &&
       (hasAnySVEFeature(targetAttr) || hasSMEFeature(targetAttr))) {
@@ -1096,7 +1105,7 @@ void ConvertToLLVMPass::runOnOperation() {
     RewritePatternSet patterns(&getContext());
     patterns.insert<RewriteExternCallOpToDynamicImportCallOp, RewriteCallOpABI,
                     RewriteFuncOpABI>(abi, typeConverter);
-    if (failed(applyPatternsAndFoldGreedily(module, std::move(patterns))))
+    if (failed(applyPatternsGreedily(module, std::move(patterns))))
       return signalPassFailure();
   }
 
@@ -1108,7 +1117,7 @@ void ConvertToLLVMPass::runOnOperation() {
     if (triple.isWasm()) {
       populateUnfusedFMAOpsPassPatterns(&getContext(), postPatterns);
     }
-    if (failed(applyPatternsAndFoldGreedily(module, std::move(postPatterns)))) {
+    if (failed(applyPatternsGreedily(module, std::move(postPatterns)))) {
       return signalPassFailure();
     }
   }

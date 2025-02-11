@@ -64,10 +64,9 @@ struct DropToLayoutUnitDims final
         toLayoutOp.getSharedMemoryConversion(), toLayoutOp.getMmaKindAttr());
 
     // Expand to preserve output shape using insert_slice.
-    // Here, since the shape comes from the result of a to_layout op, it will
-    // always be static.
-    Value dest =
-        rewriter.create<tensor::EmptyOp>(loc, shape, inputTy.getElementType());
+    Value dest = rewriter.create<tensor::EmptyOp>(
+        loc, tensor::getMixedSizes(rewriter, loc, toLayoutOp.getInput()),
+        inputTy.getElementType());
 
     int64_t rank = inputTy.getRank();
     SmallVector<OpFoldResult> offsets(rank, rewriter.getIndexAttr(0));
@@ -92,8 +91,7 @@ struct VectorExtFoldUnitExtentDimsPass final
     MLIRContext *ctx = &getContext();
     RewritePatternSet patterns(ctx);
     patterns.add<DropToLayoutUnitDims>(ctx);
-    if (failed(applyPatternsAndFoldGreedily(getOperation(),
-                                            std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       return signalPassFailure();
     }
   }

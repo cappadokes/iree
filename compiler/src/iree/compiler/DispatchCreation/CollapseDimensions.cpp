@@ -12,6 +12,7 @@
 #include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtOps.h"
 #include "iree/compiler/Dialect/LinalgExt/Transforms/Transforms.h"
 #include "iree/compiler/DispatchCreation/Passes.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/Support/Debug.h"
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/Affine/Utils.h"
@@ -121,36 +122,45 @@ static SmallVector<ReassociationIndices> getCollapsibleLoops(Operation *op) {
            (rDimsSet.count(prePos) && rDimsSet.count(nextPos));
   };
 
-  ReassociationIndices range;
-  AffineExpr preExpr;
   // Find the largest sequence of dimensions that are
   // - Either preserved in all maps, or
   // - are completely absent
   // This sequence can be collapsed. To find the sequence,
-  // 1) Take the result expressions of one of the indexing maps
-  // 2) Find a sequence of 2 that is found in all maps
+  // 1) For each indexing map, take the result expressions
+  // 2) Find a sequence of 2 that is found in all maps (or absent)
   // 3) Then take last element of this sequence and the next
   //    result expression, and check if this sequence of 2 is
   //    found in all maps. If so, add to sequence (to get a sequence of 3)
   //    and repeat till the last element of sequence and the next result
   //    expression is not found as a sequence in all maps.
-  for (auto nextExpr :
-       fusionInterfaceOp.getIndexingMapsArray().front().getResults()) {
-    unsigned position = cast<AffineDimExpr>(nextExpr).getPosition();
-    if (!range.empty()) {
+
+  llvm::SmallSetVector<unsigned, 8> seenLoops;
+  for (auto map : fusionInterfaceOp.getIndexingMapsArray()) {
+    ReassociationIndices range;
+    AffineExpr preExpr;
+
+    auto appendAndClearRange = [&]() {
+      if (range.size() > 1) {
+        contiguousLoops.push_back(range);
+      }
+      range.clear();
+    };
+
+    for (auto nextExpr : map.getResults()) {
+      unsigned position = cast<AffineDimExpr>(nextExpr).getPosition();
+      if (seenLoops.contains(position)) {
+        appendAndClearRange();
+        continue;
+      }
       if (!hasAllMapsSameSequence(preExpr, nextExpr) ||
           !hasSameIteratorType(preExpr, nextExpr)) {
-        if (range.size() > 1) {
-          contiguousLoops.push_back({range.begin(), range.end()});
-        }
-        range.clear();
+        appendAndClearRange();
       }
+      range.push_back(position);
+      seenLoops.insert(position);
+      preExpr = nextExpr;
     }
-    range.push_back(position);
-    preExpr = nextExpr;
-  }
-  if (range.size() > 1) {
-    contiguousLoops.push_back(range);
+    appendAndClearRange();
   }
 
   return contiguousLoops;
@@ -192,21 +202,20 @@ static bool isEligibleForCollapse(Operation *op) {
   }
 
   // TODO(#17948) GPU codegen fails when we collapse the dimensions of softmax.
-  if (llvm::any_of(genericOp.getDpsInputOperands(),
-                   [&](OpOperand *operand) -> bool {
-                     auto genericOperand =
-                         operand->get().getDefiningOp<linalg::GenericOp>();
-                     if (!genericOperand) {
-                       return false;
-                     }
+  auto isPossiblySoftmax = [&](OpOperand *operand) -> bool {
+    auto genericOperand = operand->get().getDefiningOp<linalg::GenericOp>();
+    if (!genericOperand) {
+      return false;
+    }
 
-                     if (genericOperand.getNumReductionLoops() == 0) {
-                       return false;
-                     }
+    if (genericOperand.getNumReductionLoops() == 0) {
+      return false;
+    }
 
-                     return genericOp.getMatchingIndexingMap(operand)
-                         .isProjectedPermutation();
-                   })) {
+    auto map = genericOp.getMatchingIndexingMap(operand);
+    return !map.isPermutation() && map.isProjectedPermutation();
+  };
+  if (llvm::any_of(genericOp.getDpsInputOperands(), isPossiblySoftmax)) {
     return false;
   }
 
@@ -305,19 +314,20 @@ public:
   void dump() const;
 
   // Update CollapseInfo to ensure that all dimensions collapsable in `this` are
-  // also collapsable in `consumerInfo`. This means:
-  // 1. Any dimension not collapsable in `consumerInfo` should not be
+  // also collapsable in `otherInfo`. This means:
+  // 1. Any dimension not collapsable in `otherInfo` should not be
   // collapsable in `this`
   // 2. For any pair of dimensions in `this`, if they are collapsable in
-  // `consumerInfo`, they must be collapsable into the same dimension in
-  // `consumerInfo` to be collapsable into the same dimension in `this`.
+  // `otherInfo`, they must be collapsable into the same dimension in
+  // `otherInfo` to be collapsable into the same dimension in `this`.
   // Returns true if the operation modified the number of collapsable loops.
-  bool updateFromConsumer(OpOperand *operand, const CollapseInfo &consumerInfo);
+  bool updateFromOther(FailureOr<AffineMap> otherToThisMap,
+                       const CollapseInfo &otherInfo);
 
-  // Update `collapsableLoops` by subtracting `uncollapsable` and update the
-  // reassociation indicies accordingly.
-  // Returns true if the operation modified the number of collapsable loops.
-  bool updateCollapseViaSubtract(const CollapsableLoopsSet &uncollapsable);
+  // Update `this` (which is the info for `op`) when either a producer or
+  // consumer is not collapsible. This is done by considering all the dims
+  // accessed by other to be uncollapsible.
+  bool updateFromUncollapsible(Operation *op, OpOperand *operand);
 
   // Get `collapsableLoops` after applying the transformation provided by `map`.
   // Note: doesn't modify `collapsableLoops`, the tranformation is applied to a
@@ -451,48 +461,56 @@ CollapseInfo::getTransformedReassociation(AffineMap map) const {
   return transformedReassociation;
 }
 
-bool CollapseInfo::updateFromConsumer(OpOperand *operand,
-                                      const CollapseInfo &consumerInfo) {
-  FailureOr<AffineMap> consumerToProducerMap =
-      getConsumerLoopToProducerLoopsMap(*operand);
-  if (failed(consumerToProducerMap)) {
+bool CollapseInfo::updateFromOther(FailureOr<AffineMap> otherToThisMap,
+                                   const CollapseInfo &otherInfo) {
+  if (failed(otherToThisMap)) {
     return this->clear();
   }
 
-  CollapsableLoopsSet consumerCollapsable =
-      consumerInfo.getTransformedCollapsableLoops(
-          consumerToProducerMap.value());
+  CollapsableLoopsSet otherCollapsible =
+      otherInfo.getTransformedCollapsableLoops(otherToThisMap.value());
 
-  SmallVector<ReassociationIndices> consumerReassoc =
-      consumerInfo.getTransformedReassociation(consumerToProducerMap.value());
+  SmallVector<ReassociationIndices> otherReassoc =
+      otherInfo.getTransformedReassociation(otherToThisMap.value());
 
   // Get a map from original index to the index it gets collapsed into
-  llvm::DenseMap<long, long> consumerCollapseMap;
-  for (const auto &[idx, indicies] : llvm::enumerate(consumerReassoc)) {
+  llvm::DenseMap<long, long> otherCollapseMap;
+  for (const auto &[idx, indicies] : llvm::enumerate(otherReassoc)) {
     for (const auto elem : indicies) {
-      consumerCollapseMap[elem] = idx;
+      otherCollapseMap[elem] = idx;
     }
   }
 
-  // Remove all collapsable loops in `producer` that are not collapsable in
-  // `consumer` (set intersect)
-  bool didChange = collapsableLoops.remove_if(
-      [&](long elem) -> bool { return !consumerCollapsable.contains(elem); });
+  // Remove all collapsable loops in `this` that both exist and are not
+  // collapsable in `other` (set intersect)
+  bool didChange = collapsableLoops.remove_if([&](long elem) -> bool {
+    // Exists and is collapsable
+    if (otherCollapsible.contains(elem)) {
+      return false;
+    }
+
+    // Does not exist in `other`.
+    if (!otherToThisMap->isFunctionOfDim(elem)) {
+      return false;
+    }
+
+    return true;
+  });
 
   // Now update the reassociation indicies given the updated `collapsableLoops`
-  // and `consumerCollapsableMap`.
+  // and `otherCollapsableMap`.
   // The idea is to reconstruct the reassociation indicies, and at each index:
   // (1) If `index` IS NOT in `collapsableLoops`, split `indicies` and don't add
   // `index` to either.
   //
-  // (2) If `index` IS in `collapsableLoops` but `consumerCollapseMap` maps
+  // (2) If `index` IS in `collapsableLoops` but `otherCollapseMap` maps
   // `index` to a different collapsed loop then the other indicies,  split
   // `indicies` and insert `index` into the new one.
   //
   // For example:
-  // producer reassociation = [[0, 1], [2, 3]]
-  // consumer reassociation = [0, 1, 2, 3]
-  // then, consumer reassociation gets updated to [[0, 1], [2, 3]] because
+  // `this` reassociation = [[0, 1], [2, 3]]
+  // `other` reassociation = [0, 1, 2, 3]
+  // then, `other` reassociation gets updated to [[0, 1], [2, 3]] because
   // [0, 1] and [2, 3] get collapsed into different loops
   //
   // (3) Otherwise, keep the index
@@ -516,22 +534,25 @@ bool CollapseInfo::updateFromConsumer(OpOperand *operand,
         }
         newIndicies.clear();
         collapseIntoIdx = kUninitialized;
-      } else if (collapseIntoIdx == kUninitialized) {
-        // (2) First occurance of collapsable loop, set collapseIntoIdx.
-        collapseIntoIdx = consumerCollapseMap.at(index);
+      } else if (!otherCollapseMap.contains(index)) {
+        // (2) `index` does not exist in `other`.
         newIndicies.push_back(index);
-      } else if (consumerCollapseMap.at(index) != collapseIntoIdx) {
-        // (3) `index` is collapsable but not collapsable into the other loops.
+      } else if (collapseIntoIdx == kUninitialized) {
+        // (3) First occurance of collapsable loop, set collapseIntoIdx.
+        collapseIntoIdx = otherCollapseMap.at(index);
+        newIndicies.push_back(index);
+      } else if (otherCollapseMap.at(index) != collapseIntoIdx) {
+        // (4) `index` is collapsable but not collapsable into the other loops.
         // So, split them and look for other loops to collapse `index` into.
         didChange = true;
         if (newIndicies.size() > 1) {
           newReassociation.push_back(std::move(newIndicies));
         }
         newIndicies.clear();
-        collapseIntoIdx = consumerCollapseMap[index];
+        collapseIntoIdx = otherCollapseMap[index];
         newIndicies.push_back(index);
       } else {
-        // (4) `index` is collapsable and can be collapsed into
+        // (5) `index` is collapsable and can be collapsed into
         // `collapseIntoIndex`.
         newIndicies.push_back(index);
       }
@@ -545,10 +566,17 @@ bool CollapseInfo::updateFromConsumer(OpOperand *operand,
   return didChange;
 }
 
-// Update `collapsableLoops` by subtracting `uncollapsable` and update the
-// reassociation indicies accordingly.
-bool CollapseInfo::updateCollapseViaSubtract(
-    const CollapsableLoopsSet &uncollapsable) {
+bool CollapseInfo::updateFromUncollapsible(Operation *op, OpOperand *operand) {
+  auto fusionOp = cast<LinalgFusionOpInterface>(op);
+  AffineMap map = operand->getOwner() == op
+                      ? fusionOp.getMatchingIndexingMap(operand)
+                      : fusionOp.getIndexingMapMatchingResult(
+                            cast<OpResult>(operand->get()));
+
+  CollapseInfo::CollapsableLoopsSet uncollapsable;
+  for (auto expr : map.getResults()) {
+    uncollapsable.insert(cast<AffineDimExpr>(expr).getPosition());
+  }
   auto initialSize = collapsableLoops.size();
   collapsableLoops.set_subtract(uncollapsable);
   updateReassociation();
@@ -615,6 +643,7 @@ hoistTensorReshapesOutOfDispatchRegion(
   // 1. Get the slice of operations within `dispatchOp` that produce the yielded
   // value.
   BackwardSliceOptions sliceOptions;
+  sliceOptions.omitBlockArguments = true;
   sliceOptions.filter = [&](Operation *op) {
     return op->getParentOfType<IREE::Flow::DispatchRegionOp>();
   };
@@ -781,35 +810,18 @@ updateConsumersFromProducers(ArrayRef<Operation *> slice,
         continue;
       }
 
-      // Track the dimensions that are not collapsable by this current op.
-      // Initialize this with all loops in thel producer. Note: the dims are
-      // relative to the consumers iteration space, not the producers. This
-      // cannot be done via union of producer and consumer collapsable loops
-      // because the consumer may have loops that the producer does not.
-      CollapseInfo::CollapsableLoopsSet producerUncollapsable;
-      for (auto expr :
-           consumerOp.getMatchingIndexingMap(operand).getResults()) {
-        producerUncollapsable.insert(cast<AffineDimExpr>(expr).getPosition());
-      }
-
-      FailureOr<AffineMap> mapping =
-          getProducerLoopToConsumerLoopsMap(*operand);
-
-      // If there is no mapping or we can't find the op, the tensor is
-      // not collapsable. So, all dimensions of the producer are uncollapsable.
-      if (!opMap.contains(producerOp) || failed(mapping)) {
-        didChange |=
-            consumerInfo.updateCollapseViaSubtract(producerUncollapsable);
+      // If we can't find the op, the tensor is not collapsable. So, consider
+      // all the dimensions of the producer to be uncollapsable.
+      if (!opMap.contains(producerOp)) {
+        didChange |= consumerInfo.updateFromUncollapsible(consumerOp, operand);
         continue;
       }
 
       const CollapseInfo &producerInfo = opMap.at(producerOp);
-      CollapseInfo::CollapsableLoopsSet producerCollapsable =
-          producerInfo.getTransformedCollapsableLoops(mapping.value());
-      producerUncollapsable.set_subtract(producerCollapsable);
-
+      FailureOr<AffineMap> consumerToProducerMap =
+          getProducerLoopToConsumerLoopsMap(*operand);
       didChange |=
-          consumerInfo.updateCollapseViaSubtract(producerUncollapsable);
+          consumerInfo.updateFromOther(consumerToProducerMap, producerInfo);
     }
   }
   return didChange;
@@ -827,21 +839,31 @@ updateProducersFromConsumers(ArrayRef<Operation *> slice,
   // Iterate over `slice` in reverse so that we visit each `op` 's consumer
   // before visiting `op`.
   for (auto op : llvm::reverse(slice)) {
-    auto consumerOp = cast<DestinationStyleOpInterface>(op);
-    const CollapseInfo &consumerInfo = opMap.at(consumerOp);
+    auto producerOp = cast<LinalgFusionOpInterface>(op);
+    CollapseInfo &producerInfo = opMap.find(producerOp)->second;
 
-    for (auto *operand : consumerOp.getDpsInputOperands()) {
-      auto definingOp = operand->get().getDefiningOp();
-      if (!definingOp || !opMap.contains(definingOp)) {
+    for (auto &operand : producerOp->getUses()) {
+      auto *consumerOp = operand.getOwner();
+      if (consumerOp->hasTrait<OpTrait::IsTerminator>()) {
+        continue;
+      }
+
+      // If we can't find the op, the tensor is not collapsable. So, consider
+      // all the dimensions of the consumer to be uncollapsable.
+      if (!opMap.contains(consumerOp)) {
+        didChange |= producerInfo.updateFromUncollapsible(producerOp, &operand);
         continue;
       }
 
       // Get a mapping from the consumer's iteration space to the producer's.
-      CollapseInfo &producerInfo = opMap.find(definingOp)->second;
+      const CollapseInfo &consumerInfo = opMap.at(consumerOp);
 
       // Only loops collapsable in both the consumer and producer may be
       // collapsed.
-      didChange |= producerInfo.updateFromConsumer(operand, consumerInfo);
+      FailureOr<AffineMap> consumerToProducerMap =
+          getConsumerLoopToProducerLoopsMap(operand);
+      didChange |=
+          producerInfo.updateFromOther(consumerToProducerMap, consumerInfo);
     }
   }
   return didChange;
@@ -868,6 +890,7 @@ collapseDimensionsForDispatch(IRRewriter &rewriter,
   BackwardSliceOptions sliceOptions;
   sliceOptions.inclusive = true;
   sliceOptions.omitBlockArguments = true;
+  sliceOptions.omitUsesFromAbove = false;
   sliceOptions.filter = [&](Operation *op) -> bool {
     auto parentOp = op->getParentOfType<IREE::Flow::DispatchRegionOp>();
     return isEligibleForCollapse(op) && parentOp == regionOp;
@@ -1031,7 +1054,7 @@ void CollapseDimensionsPass::runOnOperation() {
       }
     });
     if (failed(
-            applyOpPatternsAndFold(candidateOps, std::move(moveReshapeOps)))) {
+            applyOpPatternsGreedily(candidateOps, std::move(moveReshapeOps)))) {
       funcOp.emitOpError(
           "failed to propagate reshape ops introduced during collapse");
       return signalPassFailure();

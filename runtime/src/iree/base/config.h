@@ -80,7 +80,7 @@ typedef IREE_HOST_SIZE_T iree_host_size_t;
 
 // Maximum representable value in iree_host_size_t.
 #define IREE_HOST_SIZE_MAX \
-  (sizeof(iree_host_size_t) == 4 ? UINT32_MAX : UINT64_MAX)
+  ((iree_host_size_t)(sizeof(iree_host_size_t) == 4 ? UINT32_MAX : UINT64_MAX))
 
 #if !defined(IREE_DEVICE_SIZE_T)
 #define IREE_DEVICE_SIZE_T size_t
@@ -91,8 +91,9 @@ typedef IREE_HOST_SIZE_T iree_host_size_t;
 typedef IREE_DEVICE_SIZE_T iree_device_size_t;
 
 // Maximum representable value in iree_device_size_t.
-#define IREE_DEVICE_SIZE_MAX \
-  (sizeof(iree_device_size_t) == 4 ? UINT32_MAX : UINT64_MAX)
+#define IREE_DEVICE_SIZE_MAX                                         \
+  ((iree_device_size_t)(sizeof(iree_device_size_t) == 4 ? UINT32_MAX \
+                                                        : UINT64_MAX))
 
 //===----------------------------------------------------------------------===//
 // iree_status_t configuration
@@ -128,6 +129,8 @@ typedef IREE_DEVICE_SIZE_T iree_device_size_t;
 //===----------------------------------------------------------------------===//
 // Synchronization and threading
 //===----------------------------------------------------------------------===//
+
+#if !defined(IREE_SYNCHRONIZATION_DISABLE_UNSAFE)
 // On ultra-tiny systems where there may only be a single core - or a single
 // core that is guaranteed to ever call an IREE API - all synchronization
 // primitives used throughout IREE can be turned into no-ops. Note that behavior
@@ -135,31 +138,46 @@ typedef IREE_DEVICE_SIZE_T iree_device_size_t;
 // owned by IREE from multiple threads concurrently or across threads without
 // proper barriers in place. Unless your target system is in a similar class to
 // an Arduino this is definitely not what you want.
-
-#if !defined(IREE_SYNCHRONIZATION_DISABLE_UNSAFE)
 #define IREE_SYNCHRONIZATION_DISABLE_UNSAFE 0
 #endif  // !IREE_SYNCHRONIZATION_DISABLE_UNSAFE
 
 //===----------------------------------------------------------------------===//
 // File I/O
 //===----------------------------------------------------------------------===//
+
+#if !defined(IREE_FILE_IO_ENABLE)
 // On platforms without file systems or in applications where no file I/O
 // utilities are used, all file I/O operations can be stripped out. Functions
 // relying on file I/O will still be defined, but they will return errors.
-
-#if !defined(IREE_FILE_IO_ENABLE)
 #define IREE_FILE_IO_ENABLE 1
 #endif  // !IREE_FILE_IO_ENABLE
+
+#if !defined(IREE_MAX_PATH)
+// Maximum path C string length in characters excluding the NUL terminator.
+// We stack allocate the path and want to keep it small enough to reasonably
+// fit on any particular thread's stack (which may be as small as 64KB and we
+// don't know who may be in the call stack above us).
+//
+// PATH_MAX is linux-only but _sometimes_ available on other platforms we use
+// this code path for. Only when it's available it may indicate the PATH_MAX
+// with _or_ without the NUL terminator. If we guess too large here the platform
+// will fail as it scans the path and if we guess too small then users may want
+// to re-evaluate their usage of the filesystem.
+//
+// MAX_PATH is 260 but most systems nowadays have long paths enabled and we
+// don't want to limit ourselves to that.
+#define IREE_MAX_PATH 2047
+#endif  // !IREE_MAX_PATH
 
 //===----------------------------------------------------------------------===//
 // Statistics/reporting
 //===----------------------------------------------------------------------===//
+
+#if !defined(IREE_STATISTICS_ENABLE)
 // Conditionally enables programmatic access to aggregate statistics. When
 // enabled statistics requires additional per-operation logic and per-resource
 // state that can bloat otherwise minimal structures. Shared resources may also
 // require synchronization where there otherwise would not be any.
-
-#if !defined(IREE_STATISTICS_ENABLE)
 #define IREE_STATISTICS_ENABLE 1
 #endif  // !IREE_STATISTICS_ENABLE
 
@@ -173,6 +191,7 @@ typedef IREE_DEVICE_SIZE_T iree_device_size_t;
 // Specify a custom header with `-DIREE_TRACING_PROVIDER_H="my_provider.h"`.
 // Specify a dependency with `-DIREE_TRACING_PROVIDER=my_provider_target`.
 
+#if !defined(IREE_TRACING_MODE)
 // Set IREE_TRACING_FEATURES based on IREE_TRACING_MODE if the user hasn't
 // overridden it with more specific settings.
 //
@@ -181,7 +200,6 @@ typedef IREE_DEVICE_SIZE_T iree_device_size_t;
 // IREE_TRACING_MODE = 2: same as 1 with added allocation tracking
 // IREE_TRACING_MODE = 3: same as 2 with callstacks for allocations
 // IREE_TRACING_MODE = 4: same as 3 with callstacks for all instrumentation
-#if !defined(IREE_TRACING_MODE)
 #define IREE_TRACING_MODE 0
 #endif  // !IREE_TRACING_MODE
 
@@ -251,6 +269,16 @@ typedef IREE_DEVICE_SIZE_T iree_device_size_t;
 #define IREE_VM_BACKTRACE_ENABLE 1
 #endif  // !IREE_VM_BACKTRACE_ENABLE
 
+#if !defined(IREE_VM_EXECUTION_TRACING_FORCE_ENABLE)
+// Forces tracing of VM execution by default ignoring runtime flags that may
+// otherwise control the behavior. This can be used to enable tracing in tools
+// that do not have flag parsing or plumbing for per-invocation flags.
+#define IREE_VM_EXECUTION_TRACING_FORCE_ENABLE 0
+#endif  // !IREE_VM_EXECUTION_TRACING_FORCE_ENABLE
+#if IREE_VM_EXECUTION_TRACING_FORCE_ENABLE
+#define IREE_VM_EXECUTION_TRACING_ENABLE 1
+#endif  // IREE_VM_EXECUTION_TRACING_FORCE_ENABLE
+
 #if !defined(IREE_VM_EXECUTION_TRACING_ENABLE)
 // Enables disassembly of vm bytecode functions and stderr dumping of execution.
 // Increases code size quite, lowers VM performance, and is generally unsafe;
@@ -261,16 +289,6 @@ typedef IREE_DEVICE_SIZE_T iree_device_size_t;
 #define IREE_VM_EXECUTION_TRACING_ENABLE 0
 #endif  // NDEBUG
 #endif  // !IREE_VM_EXECUTION_TRACING_ENABLE
-
-#if !defined(IREE_VM_EXECUTION_TRACING_FORCE_ENABLE)
-// Forces tracing of VM execution by default ignoring runtime flags that may
-// otherwise control the behavior. This can be used to enable tracing in tools
-// that do not have flag parsing or plumbing for per-invocation flags.
-#define IREE_VM_EXECUTION_TRACING_FORCE_ENABLE 0
-#endif  // !IREE_VM_EXECUTION_TRACING_FORCE_ENABLE
-#if IREE_VM_EXECUTION_TRACING_FORCE_ENABLE
-#define IREE_VM_EXECUTION_TRACING_ENABLE 1
-#endif  // IREE_VM_EXECUTION_TRACING_FORCE_ENABLE
 
 #if !defined(IREE_VM_EXECUTION_TRACING_SRC_LOC_ENABLE)
 // Enables printing of the source location of an op when tracing its execution.

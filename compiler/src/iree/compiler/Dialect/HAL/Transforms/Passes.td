@@ -187,24 +187,6 @@ def VerifyDevicesPass :
   ];
 }
 
-def FixupLegacySyncPass :
-    Pass<"iree-hal-fixup-legacy-sync", "mlir::ModuleOp"> {
-  let summary = "Applies fixups to the program for when using legacy HAL devices.";
-  let description = [{
-    Applies fixups to the program for when using legacy HAL devices that only
-    support synchronous execution. Once all devices support async this will be
-    removed.
-
-    NOTE: this pass only exists for backwards compatibility with legacy HAL
-    drivers. It will be removed once all have migrated to the modern async APIs.
-  }];
-  let dependentDialects = [
-    "mlir::arith::ArithDialect",
-    "IREE::HAL::HALDialect",
-    "IREE::Util::UtilDialect",
-  ];
-}
-
 def InlineMemoizeRegionsPass :
     Pass<"iree-hal-inline-memoize-regions", ""> {
   let summary = "Inlines `hal.device.memoize` regions into their parent region.";
@@ -376,8 +358,8 @@ def ConfigureTargetExecutableVariantsPass :
   ];
 }
 
-def TranslateExecutablesPass :
-    Pass<"iree-hal-translate-executables", "IREE::HAL::ExecutableOp"> {
+def TranslateAllExecutablesPass :
+    Pass<"iree-hal-translate-all-executables", "IREE::HAL::ExecutableOp"> {
   let summary = "Translates hal.executable ops via a nested translation pipeline.";
   let description = [{
     Runs a nested pipeline on each executable to translate its variants from
@@ -415,6 +397,15 @@ def TranslateTargetExecutableVariantsPass :
   ];
 }
 
+def HoistExecutableObjectsPass :
+    Pass<"iree-hal-hoist-executable-objects", "IREE::HAL::ExecutableVariantOp"> {
+  let summary = "Hoists local executable object annotations to the parent `hal.executable.variant`.";
+  let description = [{
+    Finds all `hal.executable.objects` attrs on all ops within an executable
+    inner module and moves them to the parent `hal.executable.variant` op.
+  }];
+}
+
 def PruneExecutablesPass :
     Pass<"iree-hal-prune-executables", "mlir::ModuleOp"> {
   let summary = "Prunes executable variants and exports that are not referenced.";
@@ -426,8 +417,8 @@ def PruneExecutablesPass :
   }];
 }
 
-def LinkExecutablesPass :
-    Pass<"iree-hal-link-executables", "mlir::ModuleOp"> {
+def LinkAllExecutablesPass :
+    Pass<"iree-hal-link-all-executables", "mlir::ModuleOp"> {
   let summary = "Links hal.executable ops into one or more hal.executable ops.";
   let description = [{
     Runs a nested pipeline to link multiple `hal.executable` ops together if the
@@ -479,8 +470,8 @@ def ResolveExportOrdinalsPass :
   ];
 }
 
-def SerializeExecutablesPass :
-    Pass<"iree-hal-serialize-executables", "IREE::HAL::ExecutableOp"> {
+def SerializeAllExecutablesPass :
+    Pass<"iree-hal-serialize-all-executables", "IREE::HAL::ExecutableOp"> {
   let summary = "Converts hal.executable.variants to one or more hal.executable.binary ops.";
   let description = [{
     Runs a nested pipeline on each executable to serialize its variants from

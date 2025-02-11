@@ -39,7 +39,7 @@ static void debugPrint(Operation *op, const char *message) {
 /// Emit shared local memory allocation in case it is needed when lowering the
 /// warp operations.
 static Value allocateGlobalSharedMemory(Location loc, OpBuilder &builder,
-                                        vector::WarpExecuteOnLane0Op warpOp,
+                                        gpu::WarpExecuteOnLane0Op warpOp,
                                         Type type) {
   MemRefType memrefType;
   auto addressSpaceAttr = gpu::AddressSpaceAttr::get(
@@ -83,8 +83,7 @@ static bool isUniformLoad(Operation *op) {
 
 /// Hoist uniform operations as well as special hal operations that have side
 /// effect but are safe to move out of the warp single lane region.
-static void
-moveScalarAndBindingUniformCode(vector::WarpExecuteOnLane0Op warpOp) {
+static void moveScalarAndBindingUniformCode(gpu::WarpExecuteOnLane0Op warpOp) {
   /// Hoist ops without side effect as well as special binding ops.
   auto canBeHoisted = [](Operation *op,
                          function_ref<bool(Value)> definedOutside) {
@@ -139,13 +138,12 @@ moveScalarAndBindingUniformCode(vector::WarpExecuteOnLane0Op warpOp) {
     op->moveBefore(warpOp);
 }
 
-/// Pattern to convert InsertElement to broadcast, this is a workaround until
-/// MultiDimReduction distribution is supported.
-struct InsertElementToBroadcast final
-    : OpRewritePattern<vector::InsertElementOp> {
-  using OpRewritePattern<vector::InsertElementOp>::OpRewritePattern;
+/// Pattern to convert single element vector.insert to broadcast, this is a
+/// workaround until MultiDimReduction distribution is supported.
+struct InsertToBroadcast final : OpRewritePattern<vector::InsertOp> {
+  using OpRewritePattern::OpRewritePattern;
 
-  LogicalResult matchAndRewrite(vector::InsertElementOp insertOp,
+  LogicalResult matchAndRewrite(vector::InsertOp insertOp,
                                 PatternRewriter &rewriter) const override {
     if (insertOp.getDestVectorType().getNumElements() != 1)
       return failure();
@@ -156,12 +154,12 @@ struct InsertElementToBroadcast final
 };
 
 /// Pattern to sink `gpu.barrier` ops out of a `warp_execute_on_lane_0` op.
-struct WarpOpBarrier final : OpRewritePattern<vector::WarpExecuteOnLane0Op> {
-  using OpRewritePattern<vector::WarpExecuteOnLane0Op>::OpRewritePattern;
+struct WarpOpBarrier final : OpRewritePattern<gpu::WarpExecuteOnLane0Op> {
+  using OpRewritePattern<gpu::WarpExecuteOnLane0Op>::OpRewritePattern;
 
-  LogicalResult matchAndRewrite(vector::WarpExecuteOnLane0Op warpOp,
+  LogicalResult matchAndRewrite(gpu::WarpExecuteOnLane0Op warpOp,
                                 PatternRewriter &rewriter) const override {
-    auto yield = cast<vector::YieldOp>(
+    auto yield = cast<gpu::YieldOp>(
         warpOp.getBodyRegion().getBlocks().begin()->getTerminator());
     Operation *lastNode = yield->getPrevNode();
     auto barrierOp = dyn_cast_or_null<gpu::BarrierOp>(lastNode);
@@ -209,11 +207,11 @@ struct VectorReductionToGPUPass final
       vector::populateVectorMultiReductionLoweringPatterns(
           patterns, vector::VectorMultiReductionLowering::InnerReduction);
       // Add clean up patterns after lowering of multidimreduce lowering.
-      patterns.add<InsertElementToBroadcast>(ctx);
+      patterns.add<InsertToBroadcast>(ctx);
       vector::ShapeCastOp::getCanonicalizationPatterns(patterns, ctx);
       vector::BroadcastOp::getCanonicalizationPatterns(patterns, ctx);
       vector::ExtractOp::getCanonicalizationPatterns(patterns, ctx);
-      (void)applyPatternsAndFoldGreedily(getOperation(), std::move(patterns));
+      (void)applyPatternsGreedily(getOperation(), std::move(patterns));
     }
 
     debugPrint(funcOp, "after step #1: preprocessing reduction ops");
@@ -234,7 +232,7 @@ struct VectorReductionToGPUPass final
     auto threadX = builder.create<gpu::ThreadIdOp>(loc, builder.getIndexType(),
                                                    gpu::Dimension::x);
     auto cstGroupSize = builder.create<arith::ConstantIndexOp>(loc, groupSize);
-    auto warpOp = builder.create<vector::WarpExecuteOnLane0Op>(
+    auto warpOp = builder.create<gpu::WarpExecuteOnLane0Op>(
         loc, TypeRange(), threadX.getResult(), groupSize);
     warpOp.getWarpRegion().takeBody(funcOp.getFunctionBody());
     Block &newBlock = funcOp.getFunctionBody().emplaceBlock();
@@ -244,7 +242,7 @@ struct VectorReductionToGPUPass final
     warpOp.getWarpRegion().getBlocks().back().back().moveBefore(&newBlock,
                                                                 newBlock.end());
     builder.setInsertionPointToEnd(&warpOp.getWarpRegion().getBlocks().back());
-    builder.create<vector::YieldOp>(loc);
+    builder.create<gpu::YieldOp>(loc);
 
     debugPrint(funcOp, "after step #2: wrapping code with the warp execute op");
 
@@ -290,7 +288,7 @@ struct VectorReductionToGPUPass final
           patterns, distributionFn, maxWriteElementsToExtract);
       patterns.add<WarpOpBarrier>(patterns.getContext(), 3);
       vector::ReductionOp::getCanonicalizationPatterns(patterns, ctx);
-      (void)applyPatternsAndFoldGreedily(getOperation(), std::move(patterns));
+      (void)applyPatternsGreedily(getOperation(), std::move(patterns));
     }
 
     debugPrint(funcOp, "after step #4: propagating distribution");
@@ -301,11 +299,11 @@ struct VectorReductionToGPUPass final
       vector::WarpExecuteOnLane0LoweringOptions options;
       options.warpAllocationFn = allocateGlobalSharedMemory;
       options.warpSyncronizationFn = [](Location loc, OpBuilder &builder,
-                                        vector::WarpExecuteOnLane0Op warpOp) {
+                                        gpu::WarpExecuteOnLane0Op warpOp) {
         builder.create<gpu::BarrierOp>(loc);
       };
       vector::populateWarpExecuteOnLane0OpToScfForPattern(patterns, options);
-      (void)applyPatternsAndFoldGreedily(getOperation(), std::move(patterns));
+      (void)applyPatternsGreedily(getOperation(), std::move(patterns));
     }
 
     debugPrint(funcOp, "after step #5: lowering remaining ops");

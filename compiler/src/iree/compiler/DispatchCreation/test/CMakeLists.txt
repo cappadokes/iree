@@ -15,6 +15,7 @@ iree_lit_test_suite(
     lit
   SRCS
     "attention_fuse_by_expansion.mlir"
+    "bubble_up_expand_shapes.mlir"
     "bubble_up_extract_slice.mlir"
     "clone_producers_into_dispatch_regions.mlir"
     "collapse_dimensions.mlir"
@@ -25,9 +26,8 @@ iree_lit_test_suite(
     "dispatch_linalg_on_tensors.mlir"
     "dispatch_linalg_on_tensors_default.mlir"
     "dispatch_linalg_on_tensors_fusion_with_transpose.mlir"
-    "dispatch_linalg_transform_dialect.mlir"
     "dispatch_region_formation_preprocessing.mlir"
-    "fold_transpose.mlir"
+    "elementwise_op_fusion.mlir"
     "fold_unit_dims.mlir"
     "form_dispatch_regions.mlir"
     "form_dispatch_workgroups.mlir"
@@ -39,17 +39,15 @@ iree_lit_test_suite(
     "hoist_encoding_ops.mlir"
     "pad_fusion_with_consumer.mlir"
     "pad_fusion_with_producer.mlir"
+    "pipeline_tests.mlir"
     "set_encoding.mlir"
     "sink_reshapes.mlir"
     "split_reduction.mlir"
     "tensor_pad_to_tensor_insert_slice.mlir"
-    "transform_dispatch_region_formation.mlir"
     "transpose_generic_ops.mlir"
   TOOLS
     FileCheck
     iree-opt
-  DATA
-    transform_dialect_dispatch_spec.mlir
 )
 
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###

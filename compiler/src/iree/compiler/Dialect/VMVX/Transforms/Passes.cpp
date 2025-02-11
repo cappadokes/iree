@@ -44,7 +44,7 @@ void buildVMVXConfigurationPassPipeline(OpPassManager &variantPassManager) {
   }
   modulePassManager.addPass(createMaterializeUserConfigsPass());
   FunctionLikeNest(modulePassManager)
-      .addPass(createCPUMaterializeDeviceEncodingPass)
+      .addPass(createMaterializeDeviceEncodingPass)
       // TODO: Remove the following pass the plumb support for
       // #hal.descriptor_type memory space through the stack.
       .addPass(createEraseHALDescriptorTypeFromMemRefPass);
@@ -92,6 +92,7 @@ buildVectorVMVXTransformPassPipeline(OpPassManager &variantPassManager) {
 
       // Resolve get_buffer_descriptor ops. All structural buffer manipulations
       // must conclude before this point.
+      .addPass(memref::createFoldMemRefAliasOpsPass)
       .addPass(createIREEExpandStridedMetadataPass)
       .addPass(createResolveBufferDescriptorsPass)
       .addPass(createCleanupBufferAllocViewPass)

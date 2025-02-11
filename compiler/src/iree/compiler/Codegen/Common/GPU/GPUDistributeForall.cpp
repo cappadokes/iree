@@ -17,6 +17,7 @@
 #include "mlir/Dialect/GPU/Transforms/Passes.h"
 #include "mlir/Dialect/SCF/IR/DeviceMappingInterface.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 
 namespace mlir::iree_compiler {
 
@@ -87,9 +88,16 @@ LogicalResult resolveGPUMappedForallOp(RewriterBase &rewriter,
   assert(!(hasThreadMapping && hasWarpMapping));
   Value flatId = linearThreadId;
   if (hasWarpMapping) {
-    OpFoldResult subgroupSizeVal = rewriter.getIndexAttr(subgroupSize);
-    flatId = affine::makeComposedAffineApply(rewriter, loc, d0.floorDiv(d1),
-                                             {flatId, subgroupSizeVal});
+    if (flatWorkgroupSize % subgroupSize != 0) {
+      return forallOp->emitOpError(
+          "found warp mapped forall with non-multiple workgroup size");
+    }
+    flatId = rewriter
+                 .create<affine::AffineDelinearizeIndexOp>(
+                     loc, flatId,
+                     ArrayRef<int64_t>{flatWorkgroupSize / subgroupSize,
+                                       subgroupSize})
+                 .getResult(0);
   }
 
   SmallVector<Value> delinSizes;
@@ -119,7 +127,12 @@ LogicalResult resolveGPUMappedForallOp(RewriterBase &rewriter,
   Value ub = getValueOrCreateConstantIndexOp(rewriter, loc, totalLoopTripCount);
   Value step =
       rewriter.create<arith::ConstantIndexOp>(loc, flatTotalNumWorkers);
+  // We need to add barriers before and after the distributed loop because the
+  // loop might have reads/writes to shared memory that can have a different
+  // layout compared to rest of the program.
+  rewriter.create<gpu::BarrierOp>(loc);
   auto forLoop = rewriter.create<scf::ForOp>(loc, lb, ub, step, ValueRange{});
+  rewriter.create<gpu::BarrierOp>(loc);
   Block *loopBody = forLoop.getBody();
 
   // Get the replacement IDs for the forall iterator ids.
@@ -190,23 +203,18 @@ void GPUDistributeForallPass::runOnOperation() {
     return signalPassFailure();
   }
 
-  AffineExpr x, y, z;
-  bindSymbols(funcOp.getContext(), x, y, z);
-  // Compute the linearized thread id.
-  AffineExpr linearId =
-      x + workgroupSize[0] * y + workgroupSize[1] * workgroupSize[0] * z;
-
   rewriter.setInsertionPointToStart(&funcOp.getFunctionBody().front());
-  SmallVector<OpFoldResult> threadGrid = {
-      rewriter.createOrFold<gpu::ThreadIdOp>(funcOp.getLoc(),
-                                             gpu::Dimension::x),
-      rewriter.createOrFold<gpu::ThreadIdOp>(funcOp.getLoc(),
-                                             gpu::Dimension::y),
-      rewriter.createOrFold<gpu::ThreadIdOp>(funcOp.getLoc(),
-                                             gpu::Dimension::z)};
+  SmallVector<Value> threadGrid = {rewriter.createOrFold<gpu::ThreadIdOp>(
+                                       funcOp.getLoc(), gpu::Dimension::z),
+                                   rewriter.createOrFold<gpu::ThreadIdOp>(
+                                       funcOp.getLoc(), gpu::Dimension::y),
+                                   rewriter.createOrFold<gpu::ThreadIdOp>(
+                                       funcOp.getLoc(), gpu::Dimension::x)};
+  SmallVector<int64_t> threadGridBasis = {workgroupSize[2], workgroupSize[1],
+                                          workgroupSize[0]};
 
-  Value linearThreadIdVal = affine::makeComposedAffineApply(
-      rewriter, funcOp.getLoc(), linearId, threadGrid);
+  Value linearThreadIdVal = rewriter.create<affine::AffineLinearizeIndexOp>(
+      funcOp.getLoc(), threadGrid, threadGridBasis, /*disjoint=*/true);
   for (auto forall : forallOps) {
     rewriter.setInsertionPoint(forall);
     if (failed(resolveGPUMappedForallOp(rewriter, forall, linearThreadIdVal,

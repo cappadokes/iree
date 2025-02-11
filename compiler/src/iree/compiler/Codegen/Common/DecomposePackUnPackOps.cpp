@@ -56,7 +56,8 @@ struct LowerPackPattern : public OpRewritePattern<tensor::PackOp> {
     if (controlFn && failed(controlFn.value()(op))) {
       return failure();
     }
-    FailureOr<linalg::LowerPackResult> res = linalg::lowerPack(rewriter, op);
+    FailureOr<linalg::LowerPackResult> res =
+        linalg::lowerPack(rewriter, op, /*lowerPadLikeWithInsertSlice=*/false);
     if (failed(res)) {
       return rewriter.notifyMatchFailure(
           op, "cannot lower to pad + expand + transpose");
@@ -83,8 +84,8 @@ struct LowerUnPackPattern : public OpRewritePattern<tensor::UnPackOp> {
     if (controlFn && failed(controlFn.value()(op))) {
       return failure();
     }
-    FailureOr<linalg::LowerUnPackOpResult> res =
-        linalg::lowerUnPack(rewriter, op);
+    FailureOr<linalg::LowerUnPackOpResult> res = linalg::lowerUnPack(
+        rewriter, op, /*lowerUnpadLikeWithExtractSlice=*/false);
     if (failed(res)) {
       return rewriter.notifyMatchFailure(
           op, "cannot lower to empty + transpose + reshape + extract_slice");
@@ -108,9 +109,9 @@ static LogicalResult commonRunOnOperation(
   // they do not generate reshape ops.
   if (!useOnlyReshapes) {
     RewritePatternSet patterns(ctx);
-    patterns.add<linalg::GeneralizeOuterUnitDimsPackOpPattern,
-                 linalg::GeneralizeOuterUnitDimsUnPackOpPattern>(ctx);
-    if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns)))) {
+    patterns.add<linalg::DecomposeOuterUnitDimsPackOpPattern,
+                 linalg::DecomposeOuterUnitDimsUnPackOpPattern>(ctx);
+    if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
       funcOp.emitError(
           "failed to apply generalization patterns on pack/unpack ops for "
           "outer unit dims cases");
@@ -123,7 +124,7 @@ static LogicalResult commonRunOnOperation(
   if (!tileOuterToOne) {
     RewritePatternSet patterns(ctx);
     patterns.add<LowerPackPattern, LowerUnPackPattern>(ctx, controlFn);
-    if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
       funcOp.emitError(
           "failed to apply generalization patterns on pack/unpack ops for "
           "general cases.");
@@ -144,9 +145,7 @@ static LogicalResult commonRunOnOperation(
               auto packOp = cast<tensor::PackOp>(op);
 
               // Do nothing if any of inner tile sizes is dynamic.
-              if (llvm::any_of(packOp.getMixedTiles(), [](OpFoldResult tile) {
-                    return tile.is<Value>();
-                  })) {
+              if (llvm::any_of(packOp.getMixedTiles(), llvm::IsaPred<Value>)) {
                 return {};
               }
 
@@ -200,7 +199,7 @@ static LogicalResult commonRunOnOperation(
             unpackTilingOptions);
         if (failed(tilingResult))
           return WalkResult::interrupt();
-        rewriter.replaceOp(op, tilingResult->replacements);
+        rewriter.replaceOp(op, tilingResult->mergeResult.replacements);
         return WalkResult::advance();
       });
       if (status.wasInterrupted()) {
@@ -223,7 +222,7 @@ static LogicalResult commonRunOnOperation(
     memref::populateResolveRankedShapedTypeResultDimsPatterns(patterns);
     ctx->getOrLoadDialect<tensor::TensorDialect>()->getCanonicalizationPatterns(
         patterns);
-    if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
       return failure();
     }
   }
@@ -239,10 +238,10 @@ static LogicalResult commonRunOnOperation(
     if (useOnlyReshapes) {
       patterns.add<LowerPackPattern, LowerUnPackPattern>(ctx, controlFn);
     } else {
-      patterns.add<linalg::GeneralizeOuterUnitDimsPackOpPattern,
-                   linalg::GeneralizeOuterUnitDimsUnPackOpPattern>(ctx);
+      patterns.add<linalg::DecomposeOuterUnitDimsPackOpPattern,
+                   linalg::DecomposeOuterUnitDimsUnPackOpPattern>(ctx);
     }
-    if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
       return failure();
     }
   }

@@ -53,8 +53,7 @@ protected:
 
 template <typename SourceOp>
 struct OpDistributionPattern : DistributionPattern {
-  OpDistributionPattern<SourceOp>(MLIRContext *context,
-                                  PatternBenefit benefit = 1)
+  OpDistributionPattern(MLIRContext *context, PatternBenefit benefit = 1)
       : DistributionPattern(SourceOp::getOperationName(), benefit, context) {}
 
   virtual LogicalResult matchAndRewrite(SourceOp op,
@@ -107,6 +106,8 @@ public:
   virtual ~VectorLayoutOptions() = default;
 
   bool verifyConversion() const { return fullConversion; }
+
+  virtual VectorLayoutInterface getDefaultLayout(VectorType type) const = 0;
 
 protected:
   Operation *root;

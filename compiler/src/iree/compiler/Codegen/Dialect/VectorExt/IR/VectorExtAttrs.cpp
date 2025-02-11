@@ -8,6 +8,7 @@
 
 #include "iree/compiler/Codegen/Dialect/VectorExt/IR/VectorExtDialect.h"
 #include "iree/compiler/Codegen/Dialect/VectorExt/IR/VectorExtOps.h"
+#include "iree/compiler/Utils/Indexing.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
@@ -24,219 +25,6 @@ using namespace mlir;
 namespace mlir::iree_compiler::IREE::VectorExt {
 
 using VectorValue = TypedValue<VectorType>;
-
-bool PerDimLayoutAttr::contains(const LayoutDimension &dim) {
-  for (LayoutDimensionAttr label : getLabels()) {
-    if (label.getValue() == dim)
-      return true;
-  }
-  return false;
-}
-
-std::optional<int64_t> PerDimLayoutAttr::getShape(const LayoutDimension &dim) {
-  for (auto value : llvm::zip(getLabels(), getShapes())) {
-    if (dim == std::get<0>(value).getValue())
-      return std::get<1>(value);
-  }
-  return std::nullopt;
-}
-
-std::optional<int64_t> LayoutAttr::getShape(const LayoutDimension &dim) const {
-  for (PerDimLayoutAttr layout : getLayouts()) {
-    std::optional<int64_t> maybeShape = layout.getShape(dim);
-    if (maybeShape)
-      return maybeShape.value();
-  }
-  return std::nullopt;
-}
-
-// Get the SIMT Vector shape in the order specified by dims. If no dims are
-// specified, then return an empty vector.
-LogicalResult LayoutAttr::isValidLayout(ShapedType shapeTy,
-                                        Location loc) const {
-  ArrayRef<int64_t> shape = shapeTy.getShape();
-  if (shape.size() != getRank()) {
-    return emitError(loc, "Rank of vector (")
-           << shape.size() << ") does not match rank of layout (" << getRank()
-           << ").";
-  }
-  for (auto [idx, layout] : llvm::enumerate(getLayouts())) {
-    ArrayRef<int64_t> layoutShape = layout.getShapes();
-    int64_t expectedShape =
-        std::reduce(layoutShape.begin(), layoutShape.end(),
-                    static_cast<int64_t>(1), std::multiplies<int64_t>());
-    if (expectedShape != shape[idx]) {
-      std::string shapeStr;
-      llvm::raw_string_ostream shapeOs(shapeStr);
-      llvm::interleaveComma(shape, shapeOs);
-      std::string layoutStr;
-      llvm::raw_string_ostream layoutOs(layoutStr);
-      printStripped(layoutOs);
-      return emitError(loc, "Vector shape: [")
-             << shapeStr << "] does not match the layout (" << layoutStr
-             << ") at dim " << idx
-             << ". Dimension expected by layout: " << expectedShape
-             << " actual: " << shape[idx];
-    }
-  }
-  return success();
-}
-
-// Project out the layout for the specified dimensions
-// resulting in the layout for a lower dimensional vector.
-VectorLayoutInterface LayoutAttr::project(ArrayRef<bool> droppedDims) const {
-  assert(droppedDims.size() == getRank() &&
-         "droppedDims size must match layout size");
-
-  ArrayRef<PerDimLayoutAttr> layouts = getLayouts();
-  SmallVector<PerDimLayoutAttr> newLayouts;
-  for (auto pair : llvm::zip(droppedDims, layouts)) {
-    if (!std::get<0>(pair))
-      newLayouts.push_back(std::get<1>(pair));
-  }
-  return LayoutAttr::get(getContext(), newLayouts);
-}
-
-// Permute the layout according to the provided permutation
-// vector. The dimensionality of the layout remains the same.
-VectorLayoutInterface LayoutAttr::permute(ArrayRef<int64_t> permutation) const {
-  assert(permutation.size() == getRank() &&
-         "permutation size must match layout rank");
-
-  ArrayRef<PerDimLayoutAttr> layouts = getLayouts();
-  SmallVector<PerDimLayoutAttr> newLayouts;
-  for (unsigned index : permutation) {
-    assert(index >= 0 && index < getRank());
-    newLayouts.push_back(layouts[index]);
-  }
-  return LayoutAttr::get(getContext(), newLayouts);
-}
-
-// This function returns the distributed shape of the SIMT
-// vector and evaluates it in the following order:
-// BATCHX, BATCHY, VECTORY, VECTORX
-// The vector dimensions are combined into a single SIMT
-// vector dimension.
-SmallVector<int64_t> LayoutAttr::getDistributedShape() const {
-  SmallVector<LayoutDimension> labels{
-      LayoutDimension::BATCHX, LayoutDimension::BATCHY,
-      LayoutDimension::VECTORY, LayoutDimension::VECTORX};
-  SmallVector<int64_t> simtVectorShape;
-  std::optional<int64_t> vectorShape;
-  for (LayoutDimension dim : labels) {
-    ArrayRef<PerDimLayoutAttr> layouts = getLayouts();
-    for (PerDimLayoutAttr layout : layouts) {
-      if (!layout.contains(dim))
-        continue;
-      int64_t shape = layout.getShape(dim).value();
-      if (isVectorDimension(dim)) {
-        vectorShape = shape * vectorShape.value_or(1);
-        continue;
-      }
-      simtVectorShape.push_back(shape);
-    }
-  }
-  if (vectorShape)
-    simtVectorShape.push_back(vectorShape.value());
-  return simtVectorShape;
-}
-
-PerDimLayoutAttr LayoutAttr::getDimLayout(int64_t dim) const {
-  assert(dim >= 0 && dim < getRank());
-  return getLayouts()[dim];
-}
-
-std::optional<int64_t> LayoutAttr::getBatchDim(int64_t dim) {
-  assert(dim < getRank());
-  PerDimLayoutAttr layout = getDimLayout(dim);
-  for (auto [name, shape] :
-       llvm::zip_equal(layout.getLabels(), layout.getShapes())) {
-    if (isBatchDimension(name.getValue()))
-      return shape;
-  }
-  return std::nullopt;
-}
-
-std::optional<int64_t> LayoutAttr::getLaneDim(int64_t dim) {
-  assert(dim < getRank());
-  PerDimLayoutAttr layout = getDimLayout(dim);
-  for (auto [name, shape] :
-       llvm::zip_equal(layout.getLabels(), layout.getShapes())) {
-    if (isLaneDimension(name.getValue()))
-      return shape;
-  }
-  return std::nullopt;
-}
-
-std::optional<LayoutDimension> LayoutAttr::getLane(int64_t dim) {
-  assert(dim < getRank());
-  PerDimLayoutAttr layout = getDimLayout(dim);
-  for (auto [name, shape] :
-       llvm::zip_equal(layout.getLabels(), layout.getShapes())) {
-    if (isLaneDimension(name.getValue()))
-      return name.getValue();
-  }
-  return std::nullopt;
-}
-
-int64_t LayoutAttr::getRank() const { return getLayouts().size(); }
-
-std::tuple<int64_t, int64_t, int64_t> LayoutAttr::getLaneGrid() {
-  int64_t laneX = 1;
-  int64_t laneY = 1;
-  int64_t laneZ = 1;
-  for (PerDimLayoutAttr dimLayout : getLayouts()) {
-    // Note that valid layouts only include at most one instance of each
-    // dimension type, so this is simply doing assignment on the first instance
-    // of each lane index, not an accumulative product.
-    auto maybeXShape = dimLayout.getShape(LayoutDimension::LANEX);
-    laneX *= maybeXShape.value_or(1);
-    auto maybeYShape = dimLayout.getShape(LayoutDimension::LANEY);
-    laneY *= maybeYShape.value_or(1);
-    auto maybeZShape = dimLayout.getShape(LayoutDimension::LANEZ);
-    laneZ *= maybeZShape.value_or(1);
-  }
-  return std::make_tuple(laneX, laneY, laneZ);
-}
-
-uint64_t LayoutAttr::getShuffleOffset(int64_t reductionDim) {
-  uint64_t offset = 0;
-  std::optional<LayoutDimension> laneDim = getLane(reductionDim);
-  if (!laneDim)
-    return offset;
-  switch (laneDim.value()) {
-  case LayoutDimension::LANEX:
-    offset = 1;
-    break;
-  case LayoutDimension::LANEY:
-    offset = getShape(LayoutDimension::LANEX).value_or(0);
-    break;
-  case LayoutDimension::LANEZ:
-    offset = getShape(LayoutDimension::LANEX).value_or(0) *
-             getShape(LayoutDimension::LANEY).value_or(0);
-    break;
-  default:
-    assert(false && "Invalid dimension! Expected lane dimension");
-    break;
-  }
-  return offset;
-}
-
-bool LayoutAttr::hasLaneConflictWith(const LayoutAttr &other) {
-  SmallVector<LayoutDimension> laneDims{
-      LayoutDimension::LANEX, LayoutDimension::LANEY, LayoutDimension::LANEZ};
-  for (LayoutDimension dim : laneDims) {
-    std::optional<int64_t> shape = getShape(dim);
-    std::optional<int64_t> otherShape = other.getShape(dim);
-    if ((shape && !otherShape) || (!shape && otherShape))
-      return true;
-    if (shape && otherShape) {
-      if (shape.value() != otherShape.value())
-        return true;
-    }
-  }
-  return false;
-}
 
 // Project the nested layout. This take a mask on the dimensions of the vector
 // associated with this layout and projects out those dimensions. This reduces
@@ -311,6 +99,33 @@ SmallVector<int64_t> NestedLayoutAttr::getDistributedShape() const {
   return shape;
 }
 
+/// Before we distribute, we would like to see this as:
+/// <SUBGROUP x BATCH x OUTER x THREAD x ELEMENT>
+SmallVector<int64_t> NestedLayoutAttr::getUndistributedPackedShape() const {
+  SmallVector<int64_t> shape;
+  int64_t rank = getRank();
+  shape.reserve(rank * 5);
+  shape.append(getSubgroupTile().begin(), getSubgroupTile().end());
+  shape.append(getBatchTile().begin(), getBatchTile().end());
+  shape.append(getOuterTile().begin(), getOuterTile().end());
+  shape.append(getThreadTile().begin(), getThreadTile().end());
+  shape.append(getElementTile().begin(), getElementTile().end());
+  return shape;
+}
+
+SmallVector<int64_t> NestedLayoutAttr::getUndistributedShape() const {
+  int64_t rank = getRank();
+  SmallVector<int64_t> shape;
+  shape.reserve(rank);
+  for (int64_t i : llvm::seq<int64_t>(rank)) {
+    int64_t expectedDimLen = getSubgroupTile()[i] * getBatchTile()[i] *
+                             getOuterTile()[i] * getThreadTile()[i] *
+                             getElementTile()[i];
+    shape.push_back(expectedDimLen);
+  }
+  return shape;
+}
+
 // Gets the rank of the undistributed vector for this layout.
 int64_t NestedLayoutAttr::getRank() const {
   // The layout requires that all size lists are the same length and match
@@ -333,7 +148,7 @@ LogicalResult NestedLayoutAttr::isValidLayout(ShapedType shapeTy,
     int64_t expectedShape = getSubgroupTile()[i] * getBatchTile()[i] *
                             getOuterTile()[i] * getThreadTile()[i] *
                             getElementTile()[i];
-    if (expectedShape != shape[i]) {
+    if (!ShapedType::isDynamic(shape[i]) && expectedShape != shape[i]) {
       std::string shapeStr;
       llvm::raw_string_ostream shapeOs(shapeStr);
       llvm::interleaveComma(shape, shapeOs);
@@ -397,6 +212,42 @@ NestedLayoutAttr NestedLayoutAttr::get(
                    normalizedThreadStrides);
 }
 
+static SmallVector<int64_t> appendDims(ArrayRef<int64_t> tileLens,
+                                       ArrayRef<int64_t> appendLens) {
+  SmallVector<int64_t> tileLensResult = llvm::to_vector(tileLens);
+  tileLensResult.insert(tileLensResult.end(), appendLens.begin(),
+                        appendLens.end());
+  return tileLensResult;
+}
+
+NestedLayoutAttr NestedLayoutAttr::get(MLIRContext *context,
+                                       NestedLayoutAttr source,
+                                       ArrayRef<int64_t> appendSubGroupLens,
+                                       ArrayRef<int64_t> appendBatchLens,
+                                       ArrayRef<int64_t> appendOuterLens,
+                                       ArrayRef<int64_t> appendThreadLens,
+                                       ArrayRef<int64_t> appendElementLens,
+                                       ArrayRef<int64_t> appendSubgroupStrides,
+                                       ArrayRef<int64_t> appendThreadStrides) {
+  SmallVector<int64_t> subgroupTile =
+      appendDims(source.getSubgroupTile(), appendSubGroupLens);
+  SmallVector<int64_t> batchTile =
+      appendDims(source.getBatchTile(), appendBatchLens);
+  SmallVector<int64_t> outerTile =
+      appendDims(source.getOuterTile(), appendOuterLens);
+  SmallVector<int64_t> threadTile =
+      appendDims(source.getThreadTile(), appendThreadLens);
+  SmallVector<int64_t> elementTile =
+      appendDims(source.getElementTile(), appendElementLens);
+  SmallVector<int64_t> subgroupStrides =
+      appendDims(source.getSubgroupStrides(), appendSubgroupStrides);
+  SmallVector<int64_t> threadStrides =
+      appendDims(source.getThreadStrides(), appendThreadStrides);
+  return NestedLayoutAttr::get(context, subgroupTile, batchTile, outerTile,
+                               threadTile, elementTile, subgroupStrides,
+                               threadStrides);
+}
+
 LogicalResult NestedLayoutAttr::verify(
     llvm::function_ref<InFlightDiagnostic()> emitError,
     ArrayRef<int64_t> subgroupTile, ArrayRef<int64_t> batchTile,
@@ -436,51 +287,28 @@ NestedLayoutAttr::computeThreadIds(Value threadId, int64_t subgroupSize,
 
   Location loc = threadId.getLoc();
 
-  AffineExpr tidExpr, size, stride;
-  bindDims(rewriter.getContext(), tidExpr);
-  bindSymbols(rewriter.getContext(), size, stride);
+  SmallVector<int64_t> subgroupBasis, threadBasis;
+  SmallVector<size_t> subgroupDimToResult, threadDimToResult;
 
-  // (tid floordiv stride) mod size
-  AffineMap threadTidMap =
-      AffineMap::get(/*dims=*/1, /*syms=*/2, tidExpr.floorDiv(stride) % size);
+  if (failed(basisFromSizesStrides(getSubgroupTile(), getSubgroupStrides(),
+                                   subgroupBasis, subgroupDimToResult)))
+    return {};
+  if (failed(basisFromSizesStrides(getThreadTile(), getThreadStrides(),
+                                   threadBasis, threadDimToResult)))
+    return {};
 
-  // (tid floordiv (stride * subgroup_size)) mod size
-  AffineMap subgroupTidMap = AffineMap::get(
-      /*dims=*/1, /*syms=*/2, tidExpr.floorDiv(stride * subgroupSize) % size);
+  // Add the subgroup_size to the end of the subgroup delinearization basis.
+  subgroupBasis.push_back(subgroupSize);
 
-  for (auto [dimSize, dimStride] :
-       llvm::zip_equal(getSubgroupTile(), getSubgroupStrides())) {
-    // Dimension is not distributed.
-    if (dimStride == 0) {
-      virtualTids.push_back(rewriter.create<arith::ConstantOp>(
-          loc, rewriter.getIndexAttr(dimStride)));
-      continue;
-    }
+  auto subgroupSplit = rewriter.create<affine::AffineDelinearizeIndexOp>(
+      loc, threadId, subgroupBasis, /*hasOuterBound=*/false);
+  auto threadSplit = rewriter.create<affine::AffineDelinearizeIndexOp>(
+      loc, threadId, threadBasis, /*hasOuterBound=*/false);
 
-    auto sizeVal =
-        rewriter.create<arith::ConstantOp>(loc, rewriter.getIndexAttr(dimSize));
-    auto strideVal = rewriter.create<arith::ConstantOp>(
-        loc, rewriter.getIndexAttr(dimStride));
-    virtualTids.push_back(rewriter.create<affine::AffineApplyOp>(
-        loc, subgroupTidMap, ValueRange{threadId, sizeVal, strideVal}));
-  }
-
-  for (auto [dimSize, dimStride] :
-       llvm::zip_equal(getThreadTile(), getThreadStrides())) {
-    // Dimension is not distributed.
-    if (dimStride == 0) {
-      virtualTids.push_back(rewriter.create<arith::ConstantOp>(
-          loc, rewriter.getIndexAttr(dimStride)));
-      continue;
-    }
-
-    auto sizeVal =
-        rewriter.create<arith::ConstantOp>(loc, rewriter.getIndexAttr(dimSize));
-    auto strideVal = rewriter.create<arith::ConstantOp>(
-        loc, rewriter.getIndexAttr(dimStride));
-    virtualTids.push_back(rewriter.create<affine::AffineApplyOp>(
-        loc, threadTidMap, ValueRange{threadId, sizeVal, strideVal}));
-  }
+  llvm::transform(subgroupDimToResult, std::back_inserter(virtualTids),
+                  [&](size_t idx) { return subgroupSplit.getResult(idx); });
+  llvm::transform(threadDimToResult, std::back_inserter(virtualTids),
+                  [&](size_t idx) { return threadSplit.getResult(idx); });
 
   return virtualTids;
 }

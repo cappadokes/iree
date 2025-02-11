@@ -182,28 +182,9 @@ static bool isPackLikeOp(Operation *op) {
   return isa<IREE::Encoding::SetEncodingOp, tensor::PackOp>(op);
 }
 
-/// Returns true if the operation is an `unpack` op or an `unset_encoding` op,
-/// or an `extract_slice` op whose source operand matches those criteria,
-/// recursively.
-/// The idea is that we want to ensure that `extract_slice` ops can't prevent
-/// fusion between a `unset_encoding` producer and some linalg consumer. In
-///   %0 = unset_encoding ...
-///   %1 = extract_slice %0 ...
-///   %2 = linalg.generic ins(%1) ...
-/// we are not content to be fusing %1 into %0, we also want to be fusing %2,
-/// so we want to prevent %1 from acting as a consumer fusion barrier.
-static bool isUnpackLikeOpViaExtractSliceOps(Operation *op) {
-  if (isa<IREE::Encoding::UnsetEncodingOp, tensor::UnPackOp>(op)) {
-    return true;
-  }
-  if (isa<tensor::ExtractSliceOp>(op)) {
-    Value source = op->getOperand(0);
-    Operation *producer = source.getDefiningOp();
-    if (isUnpackLikeOpViaExtractSliceOps(producer)) {
-      return true;
-    }
-  }
-  return false;
+/// Returns true if the operation is an `unpack` op or an `unset_encoding` op.
+static bool isUnpackLikeOp(Operation *op) {
+  return isa<IREE::Encoding::UnsetEncodingOp, tensor::UnPackOp>(op);
 }
 
 /// Since `iree_encoding.set_encoding` doesnt have padding semantics a
@@ -286,14 +267,14 @@ matchIteratorTypes(const llvm::SmallBitVector &rootOuterParallelLoop,
 
   // If the candidate is all parallel, then it should be at least as parallel as
   // the root.
-  for (int pos : llvm::seq<int>(0, rootOuterParallelLoop.size())) {
+  for (int pos : llvm::seq<int>(0, std::min(candidateOuterParallelLoop.size(),
+                                            rootOuterParallelLoop.size()))) {
     // If we reach the end of the outer loops of the root, break out of the
     // loop.
     if (!rootOuterParallelLoop.test(pos))
       break;
     // If the root loop is parallel, the candidate loop should also be parallel.
-    if (pos >= candidateOuterParallelLoop.size() ||
-        !candidateOuterParallelLoop.test(pos))
+    if (!candidateOuterParallelLoop.test(pos))
       return false;
   }
   return true;
@@ -444,21 +425,6 @@ static bool canUseInOperandAsInitOperand(OpOperand *inOperand,
   return true;
 }
 
-/// All operations in a dispatch should be vectorized, which isnt the case today
-/// This is an explicit list of operations that arent vectorized for now
-/// requiring special handling for now in dispatch region formation to avoid
-/// large stack allocations.
-static bool isVectorizedAlways(Operation *producer) {
-  // TODO(#17155) : This is a black list of operations that are not vectorized
-  // today (under the aggressive fusion flag). Remove this blacklist to return
-  // true always.
-  if (auto convOp = dyn_cast<linalg::Conv2DNhwcHwcfOp>(producer)) {
-    auto strides = convOp.getStrides();
-    return strides.isSplat() && strides.getSplatValue<int64_t>() == 1;
-  }
-  return true;
-}
-
 /// Returns true if this is a fusable use, while fusing a root with its
 /// consumer.
 static bool
@@ -476,18 +442,7 @@ isFusableWithConsumer(OpOperand &fusedOperand,
 
   // Fuse unset_encoding operations with `tensor.extract_slice` and elementwise
   // generic ops.
-  if (isUnpackLikeOpViaExtractSliceOps(producer)) {
-    // Fuse `unset_encoding` -> `extract_slice` op since they get folded into
-    // `unpack` on materialization.
-    if (isa<tensor::ExtractSliceOp>(consumer)) {
-      auto sliceOp = cast<tensor::ExtractSliceOp>(consumer);
-      return llvm::all_of(
-                 sliceOp.getMixedOffsets(),
-                 [](OpFoldResult ofr) { return isConstantIntValue(ofr, 0); }) &&
-             llvm::all_of(sliceOp.getMixedStrides(), [](OpFoldResult ofr) {
-               return isConstantIntValue(ofr, 1);
-             });
-    }
+  if (isUnpackLikeOp(producer)) {
     // Fuse `unset_encoding/unpack` -> elementwise operations. Fuse unpack with
     // non-overlapping reductions (i.e., the reduction dimension is not packed).
     if (auto consumerLinalgOp = dyn_cast<linalg::LinalgOp>(consumer)) {
@@ -584,9 +539,7 @@ isFusableWithConsumer(OpOperand &fusedOperand,
   // Under aggressive fusion assume that the dispatches are vectorized. In which
   // case we dont need to account for the subsequent stack allocation condition.
   if (options.aggressiveFusion) {
-    if (isVectorizedAlways(producer)) {
-      return true;
-    }
+    return true;
   }
 
   // While fusing with consumer, the result of the root might not be the final
@@ -680,8 +633,12 @@ isFusableWithProducer(OpOperand &operand,
     return true;
   }
 
-  // Don't fuse attention with it's producer
-  if (isa<IREE::LinalgExt::AttentionOp>(consumer)) {
+  if (auto attentionOp = dyn_cast<IREE::LinalgExt::AttentionOp>(consumer)) {
+    // Fuse with the rope computation if it is a gather operation.
+    if (IREE::LinalgExt::isGatherlikeOp(producer)) {
+      return true;
+    }
+    // Disable all other producer fusion. TODO: Enable other producer fusions.
     return false;
   }
 
@@ -731,13 +688,15 @@ fuseRootsWithProducers(MLIRContext *context, Operation *root, unsigned groupNum,
   SmallVector<Operation *> worklist;
   worklist.push_back(root);
   llvm::SmallBitVector rootOuterParallelLoops = getOuterParallelLoops(root);
+  IREE::Flow::ClonableIntoDispatchOptions clonableOptions;
+  clonableOptions.aggressive = options.aggressiveFusion;
   while (!worklist.empty()) {
     Operation *candidate = worklist.pop_back_val();
     for (OpOperand &operand : candidate->getOpOperands()) {
       Operation *producer = operand.get().getDefiningOp();
       if (!producer)
         continue;
-      if (IREE::Flow::isClonableIntoDispatchOp(producer) ||
+      if (IREE::Flow::isClonableIntoDispatchOp(producer, clonableOptions) ||
           hasFusionGroupsAttribute(producer) || hasRootOpAttribute(producer)) {
         continue;
       }
@@ -772,6 +731,8 @@ decideFusableLinalgOps(Region &region, DominanceInfo const &dominanceInfo,
                        unsigned numRootOps = 0) {
   MLIRContext *context = region.getContext();
   OpBuilder builder(context);
+  IREE::Flow::ClonableIntoDispatchOptions clonableOptions;
+  clonableOptions.aggressive = options.aggressiveFusion;
   for (Block &block : region) {
     // Dispatch region formation works by first cloning the root into
     // the dispatch region and then pulling operations in.
@@ -816,8 +777,19 @@ decideFusableLinalgOps(Region &region, DominanceInfo const &dominanceInfo,
       // materializing large tensors between dispatches.
       if (!isa<linalg::LinalgOp, tensor::PadOp, tensor::PackOp,
                IREE::Encoding::SetEncodingOp>(op) ||
-          isa<linalg::FillOp>(op) || IREE::LinalgExt::isBitExtendOp(&op) ||
-          IREE::LinalgExt::isGatherlikeOp(&op)) {
+          IREE::Flow::isClonableIntoDispatchOp(&op, clonableOptions)) {
+        continue;
+      }
+
+      // For now check if this is a rope computation that is to be fused with
+      // attention.
+      // TODO: Ideally this is just regular gather fusion which will be covered
+      // by the `isClonableIntoDispatchOp` call above, but for now this is done
+      // as a point fix.
+      if (IREE::LinalgExt::isGatherlikeOp(&op) &&
+          llvm::all_of(op.getUsers(), [](Operation *op) {
+            return isa<IREE::LinalgExt::AttentionOp>(op);
+          })) {
         continue;
       }
 

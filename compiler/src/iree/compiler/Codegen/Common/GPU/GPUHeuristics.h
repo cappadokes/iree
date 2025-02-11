@@ -10,18 +10,22 @@ namespace mlir::iree_compiler {
 
 /// Struct containing information about a matmul's shape and type.
 struct GPUMatmulShapeType {
-  SmallVector<int64_t> mSizes;
-  SmallVector<int64_t> nSizes;
-  SmallVector<int64_t> kSizes;
+  SmallVector<int64_t, 2> mSizes;
+  SmallVector<int64_t, 2> nSizes;
+  SmallVector<int64_t, 2> kSizes;
+  SmallVector<int64_t, 2> batchSizes;
   Type aType;
   Type bType;
   Type cType;
 
   GPUMatmulShapeType(int64_t m, int64_t n, int64_t k, Type a, Type b, Type c)
-      : mSizes({m}), nSizes({n}), kSizes({k}), aType(a), bType(b), cType(c) {}
-  GPUMatmulShapeType(SmallVector<int64_t> m, SmallVector<int64_t> n,
-                     SmallVector<int64_t> k, Type a, Type b, Type c)
-      : mSizes(m), nSizes(n), kSizes(k), aType(a), bType(b), cType(c) {}
+      : mSizes({m}), nSizes({n}), kSizes({k}), batchSizes({}), aType(a),
+        bType(b), cType(c) {}
+  GPUMatmulShapeType(ArrayRef<int64_t> m, ArrayRef<int64_t> n,
+                     ArrayRef<int64_t> k, ArrayRef<int64_t> batch, Type a,
+                     Type b, Type c)
+      : mSizes(m), nSizes(n), kSizes(k), batchSizes(batch), aType(a), bType(b),
+        cType(c) {}
 };
 
 /// Struct containing seed tile sizes for GPU MMA heuristics deduction logic.
@@ -81,13 +85,12 @@ struct GPUMMASchedule {
 
 /// Returns a schedule for using one of the given MMA |intrinsics| to target the
 /// input |problem|. Returns std::nullopt if we cannot find such a schedule.
-FailureOr<GPUMMASchedule>
-deduceMMASchedule(const GPUMatmulShapeType &problem,
-                  ArrayRef<GPUMatmulShapeType> intrinsics,
-                  const GPUMMAHeuristicSeeds &seeds,
-                  int64_t sharedMemLimitInBytes, int64_t subgroupSize,
-                  bool transposedLhs = false, bool transposedRhs = false,
-                  bool canUpcastAcc = false, bool mustBeAligned = true);
+FailureOr<GPUMMASchedule> deduceMMASchedule(
+    const GPUMatmulShapeType &problem, ArrayRef<GPUMatmulShapeType> intrinsics,
+    const GPUMMAHeuristicSeeds &seeds, int64_t sharedMemLimitInBytes,
+    int64_t subgroupSize, bool transposedLhs = false,
+    bool transposedRhs = false, bool canUpcastAcc = false,
+    bool mustBeAligned = true, bool doCPromotion = false);
 
 /// Returns a schedule for the pvMatmul in attention using one of the given MMA
 /// |intrinsics| to target the given attention matmul problems, |qkMatmul|

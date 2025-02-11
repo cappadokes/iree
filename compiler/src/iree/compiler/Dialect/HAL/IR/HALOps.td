@@ -746,7 +746,7 @@ def HAL_BufferLoadOp : HAL_PureOp<"buffer.load"> {
     HAL_DeviceSize:$source_offset
   );
   let results = (outs
-    AnyTypeOf<[HAL_PrimitiveType, AnyVector]>:$result
+    AnyTypeOf<[HAL_PrimitiveType, AnyVectorOfNonZeroRank]>:$result
   );
 
   let assemblyFormat = [{
@@ -764,7 +764,7 @@ def HAL_BufferStoreOp : HAL_Op<"buffer.store"> {
   }];
 
   let arguments = (ins
-    AnyTypeOf<[HAL_PrimitiveType, AnyVector]>:$value,
+    AnyTypeOf<[HAL_PrimitiveType, AnyVectorOfNonZeroRank]>:$value,
     HAL_BufferType:$target_buffer,
     HAL_DeviceSize:$target_offset
   );
@@ -3029,9 +3029,29 @@ def OpGroupInterfaceOps : OpDocGroup {
 
 let opDocGroup = OpGroupInterfaceOps in {
 
-def HAL_InterfaceWorkgroupIDOp : HAL_PureOp<"interface.workgroup.id", [
-  DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>,
-]> {
+class HAL_InterfaceWorkgroupOp<string mnemonic, list<Trait> traits = []>
+  : HAL_PureOp<mnemonic, !listconcat(traits, [
+      DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>,
+      DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>])> {
+  let arguments = (ins
+    IndexAttr:$dimension,
+    OptionalAttr<IndexAttr>:$upper_bound);
+  let results = (outs HAL_Dim:$result);
+
+  let builders = [
+    OpBuilder<(ins "unsigned":$dim, CArg<"std::optional<::llvm::APInt>", "std::nullopt">:$upper_bound),
+    [{
+      build($_builder, $_state, $_builder.getIndexType(), $_builder.getIndexAttr(dim),
+        upper_bound.has_value() ? $_builder.getIndexAttr(upper_bound->getSExtValue()) : ::mlir::IntegerAttr{});
+    }]>,
+  ];
+
+  let assemblyFormat = [{
+    `[` $dimension `]` (`upper_bound` $upper_bound^)? attr-dict `:` type($result)
+  }];
+}
+
+def HAL_InterfaceWorkgroupIDOp : HAL_InterfaceWorkgroupOp<"interface.workgroup.id"> {
   let summary = [{returns the index of the current workgroup in the grid}];
   let description = [{
     The global workgroup ID of the current tile in the range of
@@ -3046,25 +3066,9 @@ def HAL_InterfaceWorkgroupIDOp : HAL_PureOp<"interface.workgroup.id", [
     %z = hal.interface.workgroup.id[2] : index
     ```
   }];
-
-  let arguments = (ins IndexAttr:$dimension);
-  let results = (outs HAL_Dim:$result);
-
-  let builders = [
-    OpBuilder<(ins "unsigned":$dim),
-    [{
-      build($_builder, $_state, $_builder.getIndexType(), $_builder.getIndexAttr(dim));
-    }]>,
-  ];
-
-  let assemblyFormat = [{
-    `[` $dimension `]` attr-dict `:` type($result)
-  }];
 }
 
-def HAL_InterfaceWorkgroupCountOp : HAL_PureOp<"interface.workgroup.count", [
-  DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>,
-]> {
+def HAL_InterfaceWorkgroupCountOp : HAL_InterfaceWorkgroupOp<"interface.workgroup.count"> {
   let summary = [{returns the total workgroup count of the grid}];
   let description = [{
     The total number of workgroups along each dimension in the dispatch grid.
@@ -3081,24 +3085,9 @@ def HAL_InterfaceWorkgroupCountOp : HAL_PureOp<"interface.workgroup.count", [
     ```
   }];
 
-  let arguments = (ins IndexAttr:$dimension);
-  let results = (outs HAL_Dim:$result);
-
-  let builders = [
-    OpBuilder<(ins "unsigned":$dim),
-    [{
-      build($_builder, $_state, $_builder.getIndexType(), $_builder.getIndexAttr(dim));
-    }]>,
-  ];
-
-  let assemblyFormat = [{
-    `[` $dimension `]` attr-dict `:` type($result)
-  }];
 }
 
-def HAL_InterfaceWorkgroupSizeOp : HAL_PureOp<"interface.workgroup.size", [
-  DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>,
-]> {
+def HAL_InterfaceWorkgroupSizeOp : HAL_InterfaceWorkgroupOp<"interface.workgroup.size"> {
   let summary = [{returns the size of each workgroup in invocations}];
   let description = [{
     The number of local invocations within the current workgroup along each
@@ -3113,20 +3102,6 @@ def HAL_InterfaceWorkgroupSizeOp : HAL_PureOp<"interface.workgroup.size", [
     %y = hal.interface.workgroup.size[1] : index
     %z = hal.interface.workgroup.size[2] : index
     ```
-  }];
-
-  let arguments = (ins IndexAttr:$dimension);
-  let results = (outs HAL_Dim:$result);
-
-  let builders = [
-    OpBuilder<(ins "unsigned":$dim),
-    [{
-      build($_builder, $_state, $_builder.getIndexType(), $_builder.getIndexAttr(dim));
-    }]>,
-  ];
-
-  let assemblyFormat = [{
-    `[` $dimension `]` attr-dict `:` type($result)
   }];
 }
 

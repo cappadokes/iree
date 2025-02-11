@@ -198,8 +198,8 @@ static iree_status_t iree_hal_heap_allocator_allocate_buffer(
   IREE_STATISTICS(statistics = &allocator->statistics);
   iree_hal_buffer_t* buffer = NULL;
   IREE_RETURN_IF_ERROR(iree_hal_heap_buffer_create(
-      base_allocator, statistics, &compat_params, allocation_size,
-      allocator->data_allocator, allocator->host_allocator, &buffer));
+      statistics, &compat_params, allocation_size, allocator->data_allocator,
+      allocator->host_allocator, &buffer));
 
   *out_buffer = buffer;
   return iree_ok_status();
@@ -219,6 +219,9 @@ static iree_status_t iree_hal_heap_allocator_import_buffer(
     iree_hal_external_buffer_t* IREE_RESTRICT external_buffer,
     iree_hal_buffer_release_callback_t release_callback,
     iree_hal_buffer_t** IREE_RESTRICT out_buffer) {
+  iree_hal_heap_allocator_t* allocator =
+      iree_hal_heap_allocator_cast(base_allocator);
+
   // Coerce options into those required for use by heap-based devices.
   iree_hal_buffer_params_t compat_params = *params;
   iree_device_size_t allocation_size = external_buffer->size;
@@ -243,11 +246,17 @@ static iree_status_t iree_hal_heap_allocator_import_buffer(
                               "external buffer type not supported");
   }
 
+  const iree_hal_buffer_placement_t placement = {
+      .device = NULL,
+      .queue_affinity = compat_params.queue_affinity
+                            ? compat_params.queue_affinity
+                            : IREE_HAL_QUEUE_AFFINITY_ANY,
+      .flags = IREE_HAL_BUFFER_PLACEMENT_FLAG_NONE,
+  };
   return iree_hal_heap_buffer_wrap(
-      base_allocator, compat_params.type, compat_params.access,
-      compat_params.usage, external_buffer->size,
-      iree_make_byte_span(ptr, external_buffer->size), release_callback,
-      out_buffer);
+      placement, compat_params.type, compat_params.access, compat_params.usage,
+      external_buffer->size, iree_make_byte_span(ptr, external_buffer->size),
+      release_callback, allocator->host_allocator, out_buffer);
 }
 
 static iree_status_t iree_hal_heap_allocator_export_buffer(
@@ -268,9 +277,10 @@ static iree_status_t iree_hal_heap_allocator_export_buffer(
 
   // Map the entire buffer persistently, if possible.
   iree_hal_buffer_mapping_t mapping;
-  IREE_RETURN_IF_ERROR(iree_hal_buffer_map_range(
-      buffer, IREE_HAL_MAPPING_MODE_PERSISTENT,
-      iree_hal_buffer_allowed_access(buffer), 0, IREE_WHOLE_BUFFER, &mapping));
+  IREE_RETURN_IF_ERROR(
+      iree_hal_buffer_map_range(buffer, IREE_HAL_MAPPING_MODE_PERSISTENT,
+                                iree_hal_buffer_allowed_access(buffer), 0,
+                                IREE_HAL_WHOLE_BUFFER, &mapping));
 
   // Note that the returned pointer is unowned.
   out_external_buffer->type = requested_type;

@@ -1,4 +1,4 @@
-// RUN: iree-opt --pass-pipeline="builtin.module(func.func(iree-codegen-block-dynamic-dimensions, cse))" --split-input-file --mlir-print-local-scope %s | FileCheck %s
+// RUN: iree-opt --pass-pipeline="builtin.module(func.func(iree-codegen-block-dynamic-dimensions, cse))" --split-input-file --mlir-print-local-scope --iree-codegen-block-dynamic-dimensions-of-contractions %s | FileCheck %s
 
 #pipeline_layout = #hal.pipeline.layout<constants = 4, bindings = [
     #hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">,
@@ -66,11 +66,11 @@ func.func @block_attention_dims() {
 //   CHECK-DAG:   %[[C16:.+]] = arith.constant 16 : index
 //   CHECK-DAG:   %[[M:.+]] = flow.dispatch.workload.ordinal %{{.+}}, 0 : index
 //   CHECK-DAG:   %[[K2:.+]] = flow.dispatch.workload.ordinal %{{.+}}, 1 : index
-//   CHECK-DAG:   %[[M_DYNAMIC:.+]] = arith.divui %[[M]], %[[C16]]
+//   CHECK-DAG:   %[[M_DYNAMIC:.+]] = arith.divsi %[[M]], %[[C16]]
 //       CHECK:   %[[Q_BINDING:.+]] = hal.interface.binding.subspan
 //  CHECK-SAME:       binding(0)
 //  CHECK-SAME:       !flow.dispatch.tensor<readonly:tensor<4x?x16x32x128xf16>>{%[[M_DYNAMIC]]}
-//       CHECK:   %[[K2_DYNAMIC:.+]] = arith.divui %[[K2]], %[[C32]]
+//       CHECK:   %[[K2_DYNAMIC:.+]] = arith.divsi %[[K2]], %[[C32]]
 //       CHECK:   %[[K_BINDING:.+]] = hal.interface.binding.subspan
 //  CHECK-SAME:       binding(1)
 //  CHECK-SAME:       !flow.dispatch.tensor<readonly:tensor<4x?x32x32x128xf16>>{%[[K2_DYNAMIC]]}
@@ -228,3 +228,28 @@ func.func @reshape_propagation_test(%rhs : tensor<2048x4096xf16>, %m : index)
 //  CHECK-SAME:       outs(%[[EMPTY]] :
 //       CHECK:   %[[COLLAPSED:.+]] = tensor.collapse_shape %[[TRUNC]]
 //       CHECK:   return %[[COLLAPSED]]
+
+// -----
+
+func.func @multiple_dynamic_dims(%arg0 : index, %arg1 : index) -> tensor<?x?x4096xf32> {
+  %0 = util.assume.int %arg0<umin = 0, umax = 1024, udiv = 16> : index
+  %lhs = tensor.empty(%arg1, %0) : tensor<?x?x2048xf32>
+  %rhs = tensor.empty(%arg1) : tensor<?x2048x4096xf32>
+  %init = tensor.empty(%arg1, %0) : tensor<?x?x4096xf32>
+  %matmul = linalg.batch_matmul ins(%lhs, %rhs : tensor<?x?x2048xf32>, tensor<?x2048x4096xf32>)
+      outs(%init : tensor<?x?x4096xf32>) -> tensor<?x?x4096xf32>
+  return %matmul : tensor<?x?x4096xf32>
+}
+// CHECK-LABEL: func @multiple_dynamic_dims(
+//  CHECK-SAME:     %[[ARG0:[a-zA-Z0-9]+]]: index,
+//  CHECK-SAME:     %[[ARG1:[a-zA-Z0-9]+]]: index)
+//   CHECK-DAG:   %[[ARG0_ASSUME:.+]] = util.assume.int %[[ARG0]]
+//   CHECK-DAG:   %[[RHS:.+]] = tensor.empty(%[[ARG1]]) : tensor<?x2048x4096xf32>
+//   CHECK-DAG:   %[[BLOCKED_M:.+]] = affine.apply affine_map<()[s0] -> (s0 floordiv 16)>()[%[[ARG0_ASSUME]]]
+//   CHECK-DAG:   %[[LHS:.+]] = tensor.empty(%[[ARG1]], %[[BLOCKED_M]]) : tensor<?x?x16x2048xf32>
+//   CHECK-DAG:   %[[INIT:.+]] = tensor.empty(%[[ARG1]], %[[BLOCKED_M]]) : tensor<?x?x16x4096xf32>
+//       CHECK:   %[[MATMUL:.+]] = linalg.generic
+//  CHECK-SAME:       ins(%[[LHS]], %[[RHS]]
+//  CHECK-SAME:       outs(%[[INIT]] :
+//       CHECK:   %[[COLLAPSE:.+]] = tensor.collapse_shape %[[MATMUL]]
+//       CHECK:   return %[[COLLAPSE]]

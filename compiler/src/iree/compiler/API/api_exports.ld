@@ -15,6 +15,8 @@ VER_0 {
     ireeCodegenDispatchLoweringPassPipelineAttrGet;
     ireeCodegenDispatchLoweringPassPipelineAttrGetTypeID;
     ireeCodegenDispatchLoweringPassPipelineAttrGetValue;
+    ireeCodegenGetExecutableVariantOps;
+    ireeCodegenQueryMMAIntrinsics;
     ireeCodegenTranslationInfoAttrGet;
     ireeCodegenTranslationInfoAttrGetParameters;
     ireeCodegenTranslationInfoAttrGetTypeID;
@@ -72,6 +74,9 @@ VER_0 {
     ireeGPULoweringConfigAttrGet;
     ireeGPULoweringConfigAttrGetAttributes;
     ireeGPULoweringConfigAttrGetTypeID;
+    ireeGPULoweringConfigAttrGetTileSizes;
+    ireeGPULoweringConfigAttrGetSubgroupCount;
+    ireeGPULoweringConfigAttrGetMmaKind;
     ireeGPUMMAAttrGet;
     ireeGPUMMAAttrGetInfo;
     ireeGPUMMAAttrGetTypeID;

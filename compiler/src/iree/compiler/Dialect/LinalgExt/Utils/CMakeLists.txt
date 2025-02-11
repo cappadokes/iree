@@ -23,9 +23,11 @@ iree_cc_library(
   DEPS
     LLVMSupport
     MLIRAffineDialect
+    MLIRAnalysis
     MLIRArithDialect
     MLIRIR
     MLIRLinalgDialect
+    MLIRLinalgUtils
     MLIRMemRefDialect
     MLIRSupport
     MLIRTensorDialect

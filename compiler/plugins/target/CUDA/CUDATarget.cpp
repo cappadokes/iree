@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "./SetBlockIdsRangePass.h"
+#include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenDialect.h"
 #include "iree/compiler/Codegen/Dialect/GPU/TargetUtils/KnownTargets.h"
 #include "iree/compiler/Codegen/LLVMGPU/Passes.h"
@@ -384,12 +385,8 @@ public:
   getDefaultDeviceTarget(MLIRContext *context,
                          const TargetRegistry &targetRegistry) const override {
     Builder b(context);
-
-    SmallVector<NamedAttribute> deviceConfigAttrs;
-    auto deviceConfigAttr = b.getDictionaryAttr(deviceConfigAttrs);
-
-    SmallVector<NamedAttribute> executableConfigAttrs;
-    auto executableConfigAttr = b.getDictionaryAttr(executableConfigAttrs);
+    auto deviceConfigAttr = b.getDictionaryAttr({});
+    auto executableConfigAttr = b.getDictionaryAttr({});
 
     // If we had multiple target environments we would generate one target attr
     // per environment, with each setting its own environment attribute.
@@ -423,16 +420,13 @@ public:
   getExecutableTarget(MLIRContext *context) const {
     Builder b(context);
     SmallVector<NamedAttribute> configItems;
-    auto addConfig = [&](StringRef name, Attribute value) {
-      configItems.emplace_back(b.getStringAttr(name), value);
-    };
-
     if (failed(options.verify(b)))
       return nullptr;
 
     if (auto target = GPU::getCUDATargetDetails(
-            options.clTarget, options.clTargetFeatures, context))
-      addConfig("iree.gpu.target", target);
+            options.clTarget, options.clTargetFeatures, context)) {
+      configItems.emplace_back("iree.gpu.target", target);
+    }
 
     return b.getAttr<IREE::HAL::ExecutableTargetAttr>(
         b.getStringAttr("cuda"), b.getStringAttr("cuda-nvptx-fb"),
@@ -448,6 +442,8 @@ public:
     mlir::registerBuiltinDialectTranslation(registry);
     mlir::registerLLVMDialectTranslation(registry);
     mlir::registerNVVMDialectTranslation(registry);
+    // Configuration may load and manipulate transform dialect libraries.
+    registerTransformDialectTranslationDependentDialects(registry);
   }
 
   void
@@ -654,7 +650,7 @@ public:
       auto ordinalAttr = exportOp.getOrdinalAttr();
       if (!ordinalAttr) {
         return mlir::emitError(exportOp.getLoc())
-               << "could not compile rocm binary: export op is missing ordinal";
+               << "could not compile cuda binary: export op is missing ordinal";
       }
       int64_t ordinal = ordinalAttr.getInt();
 

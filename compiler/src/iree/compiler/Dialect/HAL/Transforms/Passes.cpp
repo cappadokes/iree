@@ -139,6 +139,17 @@ static llvm::cl::list<std::string> clPreprocessExecutablesWith{
         "will fail compilation."),
 };
 
+static llvm::cl::opt<bool> clLinkExecutables{
+    "iree-hal-link-executables",
+    llvm::cl::desc(
+        "Controls linking of executables. The default is to always link, "
+        "however disabling linking allows inspecting serialization "
+        "of each executable in isolation and will dump a single binary per "
+        "executable when used in conjunction with "
+        "`--iree-hal-dump-executable-binaries-to`."),
+    llvm::cl::init(true),
+};
+
 } // namespace
 
 using FunctionLikeNest =
@@ -410,7 +421,7 @@ void buildHALTransformPassPipeline(OpPassManager &passManager,
 
   if (compileFrom < PipelinePhase::ExecutableTargets) {
     passManager.addNestedPass<IREE::HAL::ExecutableOp>(
-        IREE::HAL::createTranslateExecutablesPass({targetRegistry}));
+        IREE::HAL::createTranslateAllExecutablesPass({targetRegistry}));
   }
 
   // If debug information is requested capture the translated MLIR source text
@@ -455,10 +466,6 @@ void buildHALTransformPassPipeline(OpPassManager &passManager,
     passManager.addPass(IREE::HAL::createOutlineMemoizeRegionsPass());
   }
 
-  // If any devices require the legacy synchronous execution behavior then
-  // make all async operations blocking.
-  passManager.addPass(IREE::HAL::createFixupLegacySyncPass());
-
   // Prune unused executables and their contents.
   passManager.addPass(IREE::HAL::createPruneExecutablesPass());
 
@@ -471,13 +478,22 @@ void buildHALTransformPassPipeline(OpPassManager &passManager,
   // TODO(benvanik): move translation down to here.
 
   // After all executables are translated and before resolving export
-  // ordinals, we allow the backends to link executables together. For
+  // ordinals we allow the backends to link executables together. For
   // example, the LLVM AOT backend may combine all executable targets for the
   // same architecture into a single executable and link it as a shared
   // library.
-  if (transformOptions.linkExecutables) {
-    passManager.addPass(IREE::HAL::createLinkExecutablesPass({targetRegistry}));
+  if (transformOptions.linkExecutables && clLinkExecutables) {
+    passManager.addPass(
+        IREE::HAL::createLinkAllExecutablesPass({targetRegistry}));
   }
+
+  // If any executable variants have external objects referenced within them
+  // we hoist them up to the top-level variant. This is done after linking so
+  // that we have the greatest chance of combining executables without different
+  // object attrs preventing the merging.
+  passManager.nest<IREE::HAL::ExecutableOp>()
+      .addNestedPass<IREE::HAL::ExecutableVariantOp>(
+          IREE::HAL::createHoistExecutableObjectsPass());
 
   // Resolve export ordinals from nested symbol references prior to
   // serialization. As this pass creates lookup ops it should run before
@@ -537,7 +553,7 @@ void buildHALTransformPassPipeline(OpPassManager &passManager,
   // contents not turned into a big base64 string.
   if (transformOptions.serializeExecutables) {
     passManager.addNestedPass<IREE::HAL::ExecutableOp>(
-        IREE::HAL::createSerializeExecutablesPass(
+        IREE::HAL::createSerializeAllExecutablesPass(
             {&targetRegistry, targetOptions.debugLevel,
              targetOptions.executableIntermediatesPath,
              targetOptions.executableBinariesPath}));

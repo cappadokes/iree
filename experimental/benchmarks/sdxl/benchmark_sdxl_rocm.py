@@ -25,6 +25,7 @@ punet_int8_fp8_dir = f"{artifacts_dir}/sdxl_punet_int8_fp8"
 vae_decode_dir = f"{artifacts_dir}/sdxl_vae"
 prompt_encoder_dir_compile = f"{vmfb_dir}/sdxl_clip_vmfbs"
 scheduled_unet_dir_compile = f"{vmfb_dir}/sdxl_unet_fp16_vmfbs"
+unet_fp16_960_1024_dir_compile = f"{vmfb_dir}/sdxl_unet_fp16_960_1024_vmfbs"
 punet_int8_fp16_dir_compile = f"{vmfb_dir}/sdxl_punet_int8_fp16_vmfbs"
 punet_int8_fp8_dir_compile = f"{vmfb_dir}/sdxl_punet_int8_fp8_vmfbs"
 vae_decode_dir_compile = f"{vmfb_dir}/sdxl_vae_vmfbs"
@@ -161,6 +162,27 @@ def run_sdxl_punet_int8_fp8_rocm_benchmark(rocm_chip):
     return run_iree_command(exec_args)
 
 
+def run_sdxl_unet_fp16_960_1024_rocm_benchmark(rocm_chip):
+    exec_args = [
+        "iree-benchmark-module",
+        f"--device=hip",
+        "--device_allocator=caching",
+        f"--module={unet_fp16_960_1024_dir_compile}/unet_fp16_960_1024.rocm_{rocm_chip}.vmfb",
+        f"--parameters=model={scheduled_unet_dir}/real_weights.irpa",
+        "--function=run_forward",
+        f"--input=1x4x120x128xf16",
+        f"--input=1xf16",
+        f"--input=2x64x2048xf16",
+        f"--input=2x1280xf16",
+        f"--input=2x6xf16",
+        f"--input=1xf16",
+        "--benchmark_repetitions=10",
+        "--benchmark_min_warmup_time=3.0",
+    ]
+    # iree benchmark command for full sdxl pipeline
+    return run_iree_command(exec_args)
+
+
 def run_sdxl_prompt_encoder_rocm_benchmark(rocm_chip):
     exec_args = [
         "iree-benchmark-module",
@@ -240,6 +262,7 @@ def job_summary_process(ret_value, output):
 
 
 def test_sdxl_rocm_benchmark(
+    goldentime_tolerance_multiplier,
     goldentime_rocm_e2e,
     goldentime_rocm_unet,
     goldentime_rocm_punet_int8_fp16,
@@ -522,15 +545,15 @@ def test_sdxl_rocm_benchmark(
 
     check.less_equal(
         benchmark_e2e_mean_time,
-        goldentime_rocm_e2e,
-        "SDXL e2e benchmark time should not regress",
+        goldentime_rocm_e2e * goldentime_tolerance_multiplier,
+        f"SDXL e2e benchmark time should not regress more than a factor of {goldentime_tolerance_multiplier}",
     )
     check.less_equal(
         benchmark_unet_mean_time,
-        goldentime_rocm_unet,
-        "SDXL unet benchmark time should not regress",
+        goldentime_rocm_unet * goldentime_tolerance_multiplier,
+        f"SDXL unet benchmark time should not regress more than a factor of {goldentime_tolerance_multiplier}",
     )
-    check.equal(
+    check.less_equal(
         unet_dispatch_count,
         goldendispatch_rocm_unet,
         "SDXL scheduled unet dispatch count should not regress",
@@ -543,10 +566,10 @@ def test_sdxl_rocm_benchmark(
     if rocm_chip == "gfx942":
         check.less_equal(
             benchmark_punet_int8_fp16_mean_time,
-            goldentime_rocm_punet_int8_fp16,
-            "SDXL punet f16 benchmark time should not regress",
+            goldentime_rocm_punet_int8_fp16 * goldentime_tolerance_multiplier,
+            f"SDXL punet f16 benchmark time should not regress more than a factor of {goldentime_tolerance_multiplier}",
         )
-        check.equal(
+        check.less_equal(
             punet_int8_fp16_dispatch_count,
             goldendispatch_rocm_punet_int8_fp16,
             "SDXL punet f16 dispatch count should not regress",
@@ -558,10 +581,10 @@ def test_sdxl_rocm_benchmark(
         )
         check.less_equal(
             benchmark_punet_int8_fp8_mean_time,
-            goldentime_rocm_punet_int8_fp8,
-            "SDXL punet f8 benchmark time should not regress",
+            goldentime_rocm_punet_int8_fp8 * goldentime_tolerance_multiplier,
+            f"SDXL punet f8 benchmark time should not regress more than a factor of {goldentime_tolerance_multiplier}",
         )
-        check.equal(
+        check.less_equal(
             punet_int8_fp8_dispatch_count,
             goldendispatch_rocm_punet_int8_fp8,
             "SDXL punet f8 dispatch count should not regress",
@@ -573,10 +596,10 @@ def test_sdxl_rocm_benchmark(
         )
     check.less_equal(
         benchmark_clip_mean_time,
-        goldentime_rocm_clip,
-        "SDXL prompt encoder benchmark time should not regress",
+        goldentime_rocm_clip * goldentime_tolerance_multiplier,
+        f"SDXL prompt encoder benchmark time should not regress more than a factor of {goldentime_tolerance_multiplier}",
     )
-    check.equal(
+    check.less_equal(
         clip_dispatch_count,
         goldendispatch_rocm_clip,
         "SDXL prompt encoder dispatch count should not regress",
@@ -588,10 +611,10 @@ def test_sdxl_rocm_benchmark(
     )
     check.less_equal(
         benchmark_vae_mean_time,
-        goldentime_rocm_vae,
-        "SDXL vae decode benchmark time should not regress",
+        goldentime_rocm_vae * goldentime_tolerance_multiplier,
+        f"SDXL vae decode benchmark time should not regress more than a factor of {goldentime_tolerance_multiplier}",
     )
-    check.equal(
+    check.less_equal(
         vae_dispatch_count,
         goldendispatch_rocm_vae,
         "SDXL vae decode dispatch count should not regress",

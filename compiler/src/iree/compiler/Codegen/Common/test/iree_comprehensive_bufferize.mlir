@@ -76,7 +76,7 @@ func.func @matmul() {
 
 // -----
 
-#pipeline_layout = #hal.pipeline.layout<constants = 4, bindings = [
+#pipeline_layout = #hal.pipeline.layout<constants = 5, bindings = [
   #hal.pipeline.binding<storage_buffer>,
   #hal.pipeline.binding<storage_buffer>,
   #hal.pipeline.binding<storage_buffer>
@@ -84,15 +84,17 @@ func.func @matmul() {
 func.func @matmul_fill() {
   %cst = arith.constant 0.0 : f32
   %c0 = arith.constant 0 : index
-  %c1024 = arith.constant 1024 : index
   %m = hal.interface.constant.load layout(#pipeline_layout) ordinal(0) : index
   %n = hal.interface.constant.load layout(#pipeline_layout) ordinal(1) : index
   %k = hal.interface.constant.load layout(#pipeline_layout) ordinal(2) : index
   %base_offset_i32 = hal.interface.constant.load layout(#pipeline_layout) ordinal(3) alignment(8) : i32
   %base_offset = arith.index_castui %base_offset_i32 : i32 to index
+  %res_offset_i32 = hal.interface.constant.load layout(#pipeline_layout) ordinal(4) : i32
+  %res_offset_index = arith.index_castui %res_offset_i32 : i32 to index
+  %res_offset = util.assume.int %res_offset_index[<umin = 0, umax = 0>, <umin = 128, umax = 128, udiv = 128>, <umin = 1024, umax = 1024, udiv = 1024>] : index
   %lhs = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) alignment(32) : !flow.dispatch.tensor<readonly:tensor<?x?xf32>>{%m, %k}
   %rhs = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) alignment(64) offset(%base_offset) : !flow.dispatch.tensor<readonly:tensor<?x?xf32>>{%k, %n}
-  %result = hal.interface.binding.subspan layout(#pipeline_layout) binding(2) alignment(64) offset(%c1024) : !flow.dispatch.tensor<readwrite:tensor<?x?xf32>>{%m, %n}
+  %result = hal.interface.binding.subspan layout(#pipeline_layout) binding(2) alignment(64) offset(%res_offset) : !flow.dispatch.tensor<readwrite:tensor<?x?xf32>>{%m, %n}
   %wg_id_y = hal.interface.workgroup.id[1] : index
   %wg_count_y = hal.interface.workgroup.count[1] : index
   %wg_size_y = hal.interface.workgroup.size[1] : index
@@ -127,11 +129,14 @@ func.func @matmul_fill() {
 //  CHECK-DAG:   %[[K:.+]] = hal.interface.constant.load layout({{.+}}) ordinal(2)
 //  CHECK-DAG:   %[[BASE_OFFSET_I32:.+]] = hal.interface.constant.load layout({{.+}}) ordinal(3)
 //  CHECK-DAG:   %[[BASE_OFFSET:.+]] = arith.index_castui %[[BASE_OFFSET_I32]]
+//  CHECK-DAG:   %[[RES_OFFSET_I32:.+]] = hal.interface.constant.load layout({{.+}}) ordinal(4)
+//  CHECK-DAG:   %[[RES_OFFSET_INDEX:.+]] = arith.index_castui %[[RES_OFFSET_I32]]
+//  CHECK-DAG:   %[[RES_OFFSET:.+]] = util.assume.int %[[RES_OFFSET_INDEX]]
 //  CHECK-DAG:   %[[LHS:.+]] = hal.interface.binding.subspan layout({{.+}}) binding(0) alignment(32)
 //  CHECK-DAG:   memref.assume_alignment %[[LHS]], 32
 //  CHECK-DAG:   %[[RHS:.+]] = hal.interface.binding.subspan layout({{.+}}) binding(1) alignment(64) offset(%[[BASE_OFFSET]])
 //  CHECK-DAG:   memref.assume_alignment %[[RHS]], 8
-//  CHECK-DAG:   %[[RESULT:.+]] = hal.interface.binding.subspan layout({{.+}}) binding(2) alignment(64) offset(%c1024)
+//  CHECK-DAG:   %[[RESULT:.+]] = hal.interface.binding.subspan layout({{.+}}) binding(2) alignment(64) offset(%[[RES_OFFSET]])
 //  CHECK-DAG:   memref.assume_alignment %[[RESULT]], 64
 //  CHECK-DAG:   %[[WG_ID_Y:.+]] = hal.interface.workgroup.id[1]
 //  CHECK-DAG:   %[[WG_COUNT_Y:.+]] = hal.interface.workgroup.count[1]
@@ -272,7 +277,7 @@ func.func @early_bufferized_copy_cst_ops() {
   %c1 = arith.constant 1 : index
   %c2 = arith.constant 2 : index
   %cst = arith.constant dense<0> : tensor<2x3xi32>
-  %0 = bufferization.to_memref %cst : memref<2x3xi32, affine_map<(d0, d1)[s0, s1, s2] -> (d0 * s1 + s0 + d1 * s2)>>
+  %0 = bufferization.to_memref %cst : tensor<2x3xi32> to memref<2x3xi32, affine_map<(d0, d1)[s0, s1, s2] -> (d0 * s1 + s0 + d1 * s2)>>
   %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) alignment(64) offset(%c0) : memref<2x5xi32>
   memref.assume_alignment %1, 64 : memref<2x5xi32>
   %2 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) alignment(64) offset(%c0) : !flow.dispatch.tensor<readwrite:tensor<2x5xi32>>
@@ -1402,7 +1407,7 @@ func.func @bufferize_cst_output_tensor() {
 
 //       CHECK-DAG: %[[CST1:.+]] = arith.constant -2147483648 : i32
 //       CHECK-DAG: %[[CST5:.+]] = arith.constant dense<[1, 2, 3, 4, 5]> : tensor<5xi32>
-//       CHECK: %[[CAST5:.+]] = bufferization.to_memref %[[CST5]] : memref<5xi32>
+//       CHECK: %[[CAST5:.+]] = bufferization.to_memref %[[CST5]] : tensor<5xi32> to memref<5xi32>
 //       CHECK: %[[INPUT:.+]] = hal.interface.binding.subspan layout({{.+}}) binding(0) : memref<5xf32, #hal.descriptor_type<storage_buffer>>
 //       CHECK: %[[OUTPUT:.+]] = hal.interface.binding.subspan layout({{.+}}) binding(1) : memref<i32, #hal.descriptor_type<storage_buffer>>
 //       CHECK: linalg.fill ins(%[[CST1]] : i32) outs(%[[OUTPUT]] : memref<i32{{.+}}>)
@@ -2172,7 +2177,7 @@ func.func @operand_fusion() {
 #map3 = affine_map<(d0, d1, d2, d3) -> (d0, d1, d3)>
 #map4 = affine_map<(d0, d1, d2, d3) -> (d0, d3, d2)>
 #map5 = affine_map<(d0, d1, d2, d3) -> (d0, d1, d2)>
-func.func @dot_general_nontrivial_batching_mutliple_parallel_dimension() {
+func.func @dot_general_nontrivial_batching_multiple_parallel_dimension() {
   %cst = arith.constant dense<0.000000e+00> : vector<1x4x2xf32>
   %c1 = arith.constant 1 : index
   %c6 = arith.constant 6 : index
@@ -2217,7 +2222,7 @@ func.func @dot_general_nontrivial_batching_mutliple_parallel_dimension() {
   }
   return
 }
-// CHECK-LABEL: func.func @dot_general_nontrivial_batching_mutliple_parallel_dimension()
+// CHECK-LABEL: func.func @dot_general_nontrivial_batching_multiple_parallel_dimension()
 //   CHECK-NOT:   memref.alloc
 
 // -----

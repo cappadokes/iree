@@ -6,7 +6,6 @@ tags:
   - Python
   - PyTorch
 icon: simple/onnx
-status: new
 ---
 
 # ONNX support
@@ -35,8 +34,8 @@ graph LR
     Compiled programs are used by the runtime.
   }
 
-  A["ONNX\n(protobuf)"]
-  B["MLIR\n(torch-mlir)"]
+  A["ONNX<br>(protobuf)"]
+  B["MLIR<br>(torch-mlir)"]
   C[IREE compiler]
   D[Runtime deployment]
 
@@ -57,10 +56,9 @@ graph LR
     [building from source](../../building-from-source/getting-started.md#python-bindings)
     or from pip:
 
-    === "Stable releases"
+    === ":octicons-package-16: Stable releases"
 
-        Stable release packages are
-        [published to PyPI](https://pypi.org/user/google-iree-pypi-deploy/).
+        Stable release packages are [published to PyPI](https://pypi.org/).
 
         ``` shell
         python -m pip install \
@@ -68,7 +66,7 @@ graph LR
           iree-base-runtime
         ```
 
-    === ":material-alert: Nightly releases"
+    === ":octicons-beaker-16: Nightly releases"
 
         Nightly pre-releases are published on
         [GitHub releases](https://github.com/iree-org/iree/releases).

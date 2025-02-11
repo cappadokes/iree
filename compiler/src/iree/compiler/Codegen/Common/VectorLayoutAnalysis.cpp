@@ -136,9 +136,6 @@ private:
                              RegionBranchPoint branchPoint,
                              MutableArrayRef<OpOperand> operands);
 
-  void visitRegionBranchTerminatorOpInterface(RegionBranchOpInterface branch,
-                                              RegionBranchPoint branchPoint);
-
   DistributionLayout *getLatticeElement(Value val);
 
   MLIRContext *ctx;
@@ -207,7 +204,7 @@ ChangeResult DistributionLayout::resolveWithPossibleConflict(
   // Handle case where constantOp may have multiple consumers with different
   // layouts by creating a copy of constOp for other users.
   if (!opOperand.get().hasOneUse() && !vectorLayout &&
-      llvm::dyn_cast_or_null<arith::ConstantOp>(
+      llvm::isa_and_nonnull<arith::ConstantOp, vector::StepOp>(
           opOperand.get().getDefiningOp())) {
     builder.setInsertionPoint(opOperand.get().getDefiningOp());
     Operation *copiedConstOp = builder.clone(*opOperand.get().getDefiningOp());
@@ -308,7 +305,7 @@ void DistributionLayout::print(raw_ostream &os) const {
 void DistributionLayout::onUpdate(DataFlowSolver *solver) const {
   AnalysisState::onUpdate(solver);
 
-  Value value = anchor.get<Value>();
+  Value value = cast<Value>(anchor);
 
   if (propagation) {
     // Make propagation run again on all users of this value.
@@ -1006,9 +1003,6 @@ void EnforceLayout::visitOperation(Operation *op) {
   if (auto branch = dyn_cast<RegionBranchOpInterface>(op)) {
     visitRegionSuccessors(branch, RegionBranchPoint::parent(),
                           branch->getOpOperands());
-
-    // Handle the propagation from scf.for to yield op.
-    visitRegionBranchTerminatorOpInterface(branch, RegionBranchPoint::parent());
     return;
   }
 
@@ -1099,43 +1093,6 @@ void EnforceLayout::visitRegionSuccessors(RegionBranchOpInterface branch,
       curr++;
     }
   }
-}
-
-void EnforceLayout::visitRegionBranchTerminatorOpInterface(
-    RegionBranchOpInterface branch, RegionBranchPoint branchPoint) {
-  SmallVector<RegionSuccessor> successors;
-  branch.getSuccessorRegions(branchPoint, successors);
-  if (!branch.hasLoop())
-    return;
-  SmallVector<DistributionLayout *> resultLattices;
-  for (Value result : branch->getResults()) {
-    DistributionLayout *resultLattice = getLatticeElement(result);
-    if (resultLattice->isUninitialized())
-      continue;
-    resultLattices.push_back(resultLattice);
-  }
-
-  // We do not support multiple results yet.
-  if (resultLattices.size() != 1)
-    return;
-
-  for (RegionSuccessor successor : successors) {
-    if (Region *succ = successor.getSuccessor()) {
-      Operation *terminator = succ->back().getTerminator();
-      if (scf::YieldOp yieldOp = dyn_cast<scf::YieldOp>(terminator)) {
-        for (Value operand : yieldOp.getOperands()) {
-          if (!isa<VectorType>(operand.getType())) {
-            continue;
-          }
-          DistributionLayout *forwardLattice = getLatticeElement(operand);
-          ChangeResult changed = forwardLattice->resolve(resultLattices[0]);
-          propagateIfChanged(forwardLattice, changed);
-        }
-      }
-    }
-  }
-
-  return;
 }
 
 DistributionLayout *EnforceLayout::getLatticeElement(Value val) {

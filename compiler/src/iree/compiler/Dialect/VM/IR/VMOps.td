@@ -3167,6 +3167,13 @@ def VM_CastSI64F64Op :
   let hasFolder = 1;
 }
 
+def VM_CastSI64F32Op :
+    VM_ConversionOp<I64, F32, "cast.si64.f32", VM_OPC_CastSI64F32,
+                    [VM_ExtF32]> {
+  let summary = [{cast from a signed integer to a float-point value}];
+  let hasFolder = 1;
+}
+
 def VM_CastUI64F64Op :
     VM_ConversionOp<I64, F64, "cast.ui64.f64", VM_OPC_CastUI64F64,
                     [VM_ExtF64]> {
@@ -4216,7 +4223,7 @@ class VM_CallBaseOp<string mnemonic, list<Trait> traits = []> :
 
     /// Set the callee for this operation.
     void setCalleeFromCallable(CallInterfaceCallable callee) {
-      (*this)->setAttr("callee", callee.get<SymbolRefAttr>());
+      (*this)->setAttr("callee", cast<SymbolRefAttr>(callee));
     }
 
     /// Get the argument operands to the called function as a mutable range, this is

@@ -52,6 +52,7 @@ iree_cc_library(
     MLIRROCDLToLLVMIRTranslation
     MLIRSupport
     MLIRTargetLLVMIRExport
+    iree::compiler::Codegen::Common
     iree::compiler::Codegen::Dialect::Codegen::IR::IREECodegenDialect
     iree::compiler::Codegen::Dialect::GPU::IR::IREEGPUDialect
     iree::compiler::Codegen::Dialect::GPU::TargetUtils::KnownTargets
@@ -64,6 +65,8 @@ iree_cc_library(
     iree::compiler::Dialect::HAL::Utils::LLVMLinkerUtils
     iree::compiler::PluginAPI
     iree::compiler::Utils
+    iree::compiler::plugins::target::ROCM::builtins::tuning::iree_default_tuning_specs_amdgpu
+    iree::compiler::plugins::target::ROCM::builtins::ukernel::iree_uk_amdgpu_bitcode
     iree::schemas::amdgpu_executable_def_c_fbs
     iree::schemas::executable_debug_info_c_fbs
     iree::schemas::hip_executable_def_c_fbs
@@ -149,8 +152,7 @@ endforeach()
 add_custom_command(
   OUTPUT ${_all_device_bc_files}
   DEPENDS ${_all_device_bc_deps}
-  POST_BUILD
-    ${_all_device_bc_copy_commands}
+  COMMAND ${_all_device_bc_copy_commands}
 )
 add_custom_target(iree_compiler_plugins_target_ROCM_GenDeviceLibs
   DEPENDS

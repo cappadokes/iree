@@ -1958,17 +1958,15 @@ util.func public @pad_and_set_encoding_op(%arg0 : tensor<?x?xf32>)
 // -----
 
 #encoding = #iree_encoding.encoding<operand_index = 0 : i64, op_type = matmul, element_types = [f32, f32, f32]>
-util.func public @unset_encoding_and_slice(
+util.func public @unset_encoding_with_encoded_slice(
     %arg0: tensor<?x?xf32, #encoding>,
     %arg1 : index, %arg2 : index) -> tensor<?x?xf32> {
   %0 = iree_encoding.unset_encoding %arg0
       : tensor<?x?xf32, #encoding> -> tensor<?x?xf32>{%arg1, %arg2}
-  %1 = tensor.extract_slice %0[0, 0] [%arg1, %arg2] [1, 1]
-      : tensor<?x?xf32> to tensor<?x?xf32>
-  util.return %1 : tensor<?x?xf32>
+  util.return %0 : tensor<?x?xf32>
 }
 //      CHECK: #[[ENCODING:.+]] = #iree_encoding.encoding<operand_index = 0 : i64, op_type = matmul, element_types = [f32, f32, f32]>
-//      CHECK: util.func public @unset_encoding_and_slice
+//      CHECK: util.func public @unset_encoding_with_encoded_slice
 // CHECK-SAME:     %[[ARG0:.+]]: tensor<?x?xf32, #[[ENCODING]]>
 // CHECK-SAME:     %[[ARG1:[a-zA-Z0-9]+]]: index
 // CHECK-SAME:     %[[ARG2:[a-zA-Z0-9]+]]: index
@@ -1991,8 +1989,7 @@ util.func public @unset_encoding_and_slice(
 // CHECK-SAME:         sizes = [%[[D0_W]], %[[D1_W]]]
 // CHECK-SAME:         !flow.dispatch.tensor<readonly:tensor<?x?xf32, #[[ENCODING]]>>{%[[D0_W]], %[[D1_W]]}
 //      CHECK:     %[[UNSET_ENCODING:.+]] = iree_encoding.unset_encoding %[[LOAD]]
-//      CHECK:     %[[SLICE:.+]] = tensor.extract_slice %[[UNSET_ENCODING]][0, 0] [%[[ARG0_W]], %[[ARG1_W]]]
-//      CHECK:     flow.dispatch.tensor.store %[[SLICE]], %[[OUTARG]]
+//      CHECK:     flow.dispatch.tensor.store %[[UNSET_ENCODING]], %[[OUTARG]]
 // CHECK-SAME:         sizes = [%[[ARG0_W]], %[[ARG1_W]]]
 // CHECK-SAME:         !flow.dispatch.tensor<writeonly:tensor<?x?xf32>>{%[[ARG0_W]], %[[ARG1_W]]}
 //      CHECK:     flow.return
@@ -2271,7 +2268,7 @@ util.func @mixed_conv(%arg0 : tensor<2x130x130x16xf16>, %arg1 : tensor<3x3x16x32
 
 // -----
 
-util.func @mixed_conv_unsupported(%arg0 : tensor<2x130x130x320xf16>, %arg1 : tensor<3x3x320x320xf16>) -> tensor<2x64x64x320xf16> {
+util.func @mixed_conv_stride_2(%arg0 : tensor<2x130x130x320xf16>, %arg1 : tensor<3x3x320x320xf16>) -> tensor<2x64x64x320xf16> {
   %empty = tensor.empty() : tensor<2x64x64x320xf32>
   %cst = arith.constant 0.0 : f32
   %fill = linalg.fill ins(%cst : f32) outs(%empty : tensor<2x64x64x320xf32>) -> tensor<2x64x64x320xf32>
@@ -2291,16 +2288,15 @@ util.func @mixed_conv_unsupported(%arg0 : tensor<2x130x130x320xf16>, %arg1 : ten
   } -> tensor<2x64x64x320xf16>
   util.return %truncf : tensor<2x64x64x320xf16>
 }
-// CHECK-LABEL: func public @mixed_conv_unsupported(
-//       CHECK:   %[[DISPATCH0:.+]] = flow.dispatch.workgroups
+// CHECK-LABEL: func public @mixed_conv_stride_2(
+//       CHECK:   %[[DISPATCH:.+]] = flow.dispatch.workgroups
 //       CHECK:     %[[FILL:.+]] = linalg.fill
 //       CHECK:     %[[CONV:.+]] = linalg.conv_2d_nhwc_hwcf
 //  CHECK-SAME:         outs(%[[FILL]] :
-//       CHECK:     flow.dispatch.tensor.store %[[CONV]]
-//       CHECK:   %[[DISPATCH1:.+]] = flow.dispatch.workgroups
 //       CHECK:     %[[GENERIC:.+]] = linalg.generic
+//  CHECK-SAME:         ins(%[[CONV]]
 //       CHECK:     flow.dispatch.tensor.store %[[GENERIC]]
-//       CHECK:   util.return %[[DISPATCH1]]
+//       CHECK:   util.return %[[DISPATCH]]
 
 // -----
 

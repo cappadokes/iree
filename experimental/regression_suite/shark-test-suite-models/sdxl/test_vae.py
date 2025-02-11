@@ -10,7 +10,7 @@ import os
 from conftest import VmfbManager
 from pathlib import Path
 
-rocm_chip = os.getenv("ROCM_CHIP", default="gfx90a")
+rocm_chip = os.getenv("ROCM_CHIP", default="gfx942")
 vmfb_dir = os.getenv("TEST_OUTPUT_ARTIFACTS", default=Path.cwd())
 
 ###############################################################################
@@ -33,7 +33,7 @@ sdxl_vae_real_weights = fetch_source_fixture(
 )
 
 sdxl_vae_mlir = fetch_source_fixture(
-    "https://sharkpublic.blob.core.windows.net/sharkpublic/sai/sdxl-vae-decode/model.mlirbc",
+    "https://sharkpublic.blob.core.windows.net/sharkpublic/sai/sdxl-vae-decode/model.mlir",
     group="sdxl_vae",
 )
 

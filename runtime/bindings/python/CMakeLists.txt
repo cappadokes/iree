@@ -4,15 +4,6 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-# nanobind
-include(FetchContent)
-FetchContent_Declare(
-  nanobind
-  GIT_REPOSITORY https://github.com/wjakob/nanobind.git
-  GIT_TAG        784efa2a0358a4dc5432c74f5685ee026e20f2b6 # 2.2.0
-)
-FetchContent_MakeAvailable(nanobind)
-
 set(_EXTRA_INSTALL_TOOL_TARGETS)
 set(_TRACY_ENABLED OFF)
 
@@ -127,6 +118,7 @@ iree_py_library(
     "iree/runtime/io.py"
     "iree/runtime/system_api.py"
     "iree/runtime/system_setup.py"
+    "iree/runtime/typing.py"
     "iree/runtime/version.py"
     "iree/_runtime/__init__.py"
     "iree/_runtime/libs.py"
@@ -240,13 +232,6 @@ iree_py_test(
 
 iree_py_test(
   NAME
-    hal_test
-  SRCS
-    "tests/hal_test.py"
-)
-
-iree_py_test(
-  NAME
     io_test
   SRCS
     "tests/io_test.py"
@@ -269,6 +254,13 @@ if(IREE_BUILD_COMPILER AND IREE_BUILD_BUNDLED_LLVM)
       benchmark_test
     SRCS
       "tests/benchmark_test.py"
+  )
+
+  iree_py_test(
+    NAME
+      hal_test
+    SRCS
+      "tests/hal_test.py"
   )
 
   iree_py_test(

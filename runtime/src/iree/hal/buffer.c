@@ -122,49 +122,34 @@ IREE_API_EXPORT iree_string_view_t iree_hal_buffer_usage_format(
 // Subspan indirection buffer
 //===----------------------------------------------------------------------===//
 
+typedef struct iree_hal_subspan_buffer_t {
+  iree_hal_buffer_t base;
+  iree_allocator_t host_allocator;
+} iree_hal_subspan_buffer_t;
+
 static const iree_hal_buffer_vtable_t iree_hal_subspan_buffer_vtable;
-
-IREE_API_EXPORT void iree_hal_subspan_buffer_initialize(
-    iree_hal_buffer_t* allocated_buffer, iree_device_size_t byte_offset,
-    iree_device_size_t byte_length, iree_hal_allocator_t* device_allocator,
-    iree_allocator_t host_allocator, iree_hal_buffer_t* out_buffer) {
-  IREE_ASSERT_ARGUMENT(allocated_buffer);
-  IREE_ASSERT_ARGUMENT(out_buffer);
-  iree_hal_buffer_initialize(host_allocator, device_allocator, allocated_buffer,
-                             allocated_buffer->allocation_size, byte_offset,
-                             byte_length, allocated_buffer->memory_type,
-                             allocated_buffer->allowed_access,
-                             allocated_buffer->allowed_usage,
-                             &iree_hal_subspan_buffer_vtable, out_buffer);
-}
-
-IREE_API_EXPORT void iree_hal_subspan_buffer_deinitialize(
-    iree_hal_buffer_t* buffer) {
-  IREE_ASSERT_ARGUMENT(buffer);
-  iree_hal_buffer_release(buffer->allocated_buffer);
-  buffer->allocated_buffer = NULL;
-}
 
 IREE_API_EXPORT iree_status_t iree_hal_subspan_buffer_create(
     iree_hal_buffer_t* allocated_buffer, iree_device_size_t byte_offset,
-    iree_device_size_t byte_length, iree_hal_allocator_t* device_allocator,
-    iree_allocator_t host_allocator, iree_hal_buffer_t** out_buffer) {
+    iree_device_size_t byte_length, iree_allocator_t host_allocator,
+    iree_hal_buffer_t** out_buffer) {
   IREE_ASSERT_ARGUMENT(allocated_buffer);
   IREE_ASSERT_ARGUMENT(out_buffer);
   *out_buffer = NULL;
   IREE_TRACE_ZONE_BEGIN(z0);
 
-  iree_hal_buffer_t* buffer = NULL;
+  iree_hal_subspan_buffer_t* buffer = NULL;
   iree_status_t status =
       iree_allocator_malloc(host_allocator, sizeof(*buffer), (void**)&buffer);
   if (iree_status_is_ok(status)) {
     iree_hal_buffer_initialize(
-        host_allocator, device_allocator, allocated_buffer,
+        iree_hal_buffer_placement_undefined(), allocated_buffer,
         allocated_buffer->allocation_size, byte_offset, byte_length,
         allocated_buffer->memory_type, allocated_buffer->allowed_access,
         allocated_buffer->allowed_usage, &iree_hal_subspan_buffer_vtable,
-        buffer);
-    *out_buffer = buffer;
+        &buffer->base);
+    buffer->host_allocator = host_allocator;
+    *out_buffer = &buffer->base;
   }
 
   IREE_TRACE_ZONE_END(z0);
@@ -172,11 +157,12 @@ IREE_API_EXPORT iree_status_t iree_hal_subspan_buffer_create(
 }
 
 static void iree_hal_subspan_buffer_destroy(iree_hal_buffer_t* base_buffer) {
-  iree_allocator_t host_allocator = base_buffer->host_allocator;
+  iree_hal_subspan_buffer_t* buffer = (iree_hal_subspan_buffer_t*)base_buffer;
+  iree_allocator_t host_allocator = buffer->host_allocator;
   IREE_TRACE_ZONE_BEGIN(z0);
 
   iree_hal_buffer_release(base_buffer->allocated_buffer);
-  iree_allocator_free(host_allocator, base_buffer);
+  iree_allocator_free(host_allocator, buffer);
 
   IREE_TRACE_ZONE_END(z0);
 }
@@ -222,161 +208,18 @@ static const iree_hal_buffer_vtable_t iree_hal_subspan_buffer_vtable = {
 };
 
 //===----------------------------------------------------------------------===//
-// iree_hal_deferred_buffer_t
-//===----------------------------------------------------------------------===//
-
-typedef struct iree_hal_deferred_buffer_t {
-  iree_hal_buffer_t base;
-  iree_hal_queue_affinity_t queue_affinity;
-  iree_device_size_t min_alignment;
-} iree_hal_deferred_buffer_t;
-
-static const iree_hal_buffer_vtable_t iree_hal_deferred_buffer_vtable;
-
-IREE_API_EXPORT iree_status_t iree_hal_deferred_buffer_create_reserved(
-    iree_hal_allocator_t* device_allocator, iree_device_size_t allocation_size,
-    iree_device_size_t byte_offset, iree_device_size_t byte_length,
-    iree_hal_buffer_params_t params, iree_allocator_t host_allocator,
-    iree_hal_buffer_t** out_buffer) {
-  IREE_ASSERT_ARGUMENT(out_buffer);
-  *out_buffer = NULL;
-  IREE_TRACE_ZONE_BEGIN(z0);
-
-  iree_hal_deferred_buffer_t* buffer = NULL;
-  IREE_RETURN_AND_END_ZONE_IF_ERROR(
-      z0,
-      iree_allocator_malloc(host_allocator, sizeof(*buffer), (void**)&buffer));
-  iree_hal_buffer_initialize(host_allocator, device_allocator, NULL,
-                             allocation_size, byte_offset, byte_length,
-                             params.type, params.access, params.usage,
-                             &iree_hal_deferred_buffer_vtable, &buffer->base);
-  buffer->queue_affinity = params.queue_affinity;
-  buffer->min_alignment = params.min_alignment;
-  *out_buffer = &buffer->base;
-
-  IREE_TRACE_ZONE_END(z0);
-  return iree_ok_status();
-}
-
-static void iree_hal_deferred_buffer_destroy(iree_hal_buffer_t* base_buffer) {
-  iree_allocator_t host_allocator = base_buffer->host_allocator;
-  IREE_TRACE_ZONE_BEGIN(z0);
-
-  if (base_buffer->allocated_buffer) {
-    iree_hal_buffer_release(base_buffer->allocated_buffer);
-  }
-  iree_allocator_free(host_allocator, base_buffer);
-
-  IREE_TRACE_ZONE_END(z0);
-}
-
-IREE_API_EXPORT iree_status_t
-iree_hal_deferred_buffer_commit(iree_hal_buffer_t* base_buffer) {
-  iree_hal_deferred_buffer_t* buffer = (iree_hal_deferred_buffer_t*)base_buffer;
-  if (IREE_UNLIKELY(base_buffer->allocated_buffer)) {
-    // Already committed - no-op.
-    return iree_ok_status();
-  }
-  IREE_TRACE_ZONE_BEGIN(z0);
-  iree_hal_buffer_params_t params = {
-      .usage = base_buffer->allowed_usage,
-      .access = base_buffer->allowed_access,
-      .type = base_buffer->memory_type,
-      .queue_affinity = buffer->queue_affinity,
-      .min_alignment = buffer->min_alignment,
-  };
-  iree_status_t status = iree_hal_allocator_allocate_buffer(
-      base_buffer->device_allocator, params, base_buffer->allocation_size,
-      &base_buffer->allocated_buffer);
-  IREE_TRACE_ZONE_END(z0);
-  return status;
-}
-
-IREE_API_EXPORT iree_status_t
-iree_hal_deferred_buffer_decommit(iree_hal_buffer_t* buffer) {
-  IREE_TRACE_ZONE_BEGIN(z0);
-  if (IREE_LIKELY(buffer->allocated_buffer)) {
-    iree_hal_buffer_release(buffer->allocated_buffer);
-    buffer->allocated_buffer = NULL;
-  }
-  IREE_TRACE_ZONE_END(z0);
-  return iree_ok_status();
-}
-
-static iree_status_t iree_hal_deferred_buffer_map_range(
-    iree_hal_buffer_t* buffer, iree_hal_mapping_mode_t mapping_mode,
-    iree_hal_memory_access_t memory_access,
-    iree_device_size_t local_byte_offset, iree_device_size_t local_byte_length,
-    iree_hal_buffer_mapping_t* mapping) {
-  if (IREE_UNLIKELY(!buffer->allocated_buffer)) {
-    // Performance warning: this is likely to be happening synchronously in the
-    // caller in an unexpected way. We could FAILED_PRECONDITION if we wanted
-    // to be strict but by doing this on-demand we allow deferred buffers to be
-    // used with callers that may not know that this is a reserved deferred
-    // buffer (particularly useful for outputs/copy targets).
-    IREE_RETURN_IF_ERROR(iree_hal_deferred_buffer_commit(buffer));
-  }
-  return _VTABLE_DISPATCH(buffer->allocated_buffer, map_range)(
-      buffer->allocated_buffer, mapping_mode, memory_access, local_byte_offset,
-      local_byte_length, mapping);
-}
-
-static iree_status_t iree_hal_deferred_buffer_unmap_range(
-    iree_hal_buffer_t* buffer, iree_device_size_t local_byte_offset,
-    iree_device_size_t local_byte_length, iree_hal_buffer_mapping_t* mapping) {
-  if (IREE_UNLIKELY(!buffer->allocated_buffer)) {
-    return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
-                            "buffer does not have committed storage");
-  }
-  return _VTABLE_DISPATCH(buffer->allocated_buffer, unmap_range)(
-      buffer->allocated_buffer, local_byte_offset, local_byte_length, mapping);
-}
-
-static iree_status_t iree_hal_deferred_buffer_invalidate_range(
-    iree_hal_buffer_t* buffer, iree_device_size_t local_byte_offset,
-    iree_device_size_t local_byte_length) {
-  if (IREE_UNLIKELY(!buffer->allocated_buffer)) {
-    return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
-                            "buffer does not have committed storage");
-  }
-  return _VTABLE_DISPATCH(buffer->allocated_buffer, invalidate_range)(
-      buffer->allocated_buffer, local_byte_offset, local_byte_length);
-}
-
-static iree_status_t iree_hal_deferred_buffer_flush_range(
-    iree_hal_buffer_t* buffer, iree_device_size_t local_byte_offset,
-    iree_device_size_t local_byte_length) {
-  if (IREE_UNLIKELY(!buffer->allocated_buffer)) {
-    return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
-                            "buffer does not have committed storage");
-  }
-  return _VTABLE_DISPATCH(buffer->allocated_buffer, flush_range)(
-      buffer->allocated_buffer, local_byte_offset, local_byte_length);
-}
-
-static const iree_hal_buffer_vtable_t iree_hal_deferred_buffer_vtable = {
-    .recycle = iree_hal_buffer_recycle,
-    .destroy = iree_hal_deferred_buffer_destroy,
-    .map_range = iree_hal_deferred_buffer_map_range,
-    .unmap_range = iree_hal_deferred_buffer_unmap_range,
-    .invalidate_range = iree_hal_deferred_buffer_invalidate_range,
-    .flush_range = iree_hal_deferred_buffer_flush_range,
-};
-
-//===----------------------------------------------------------------------===//
 // iree_hal_buffer_t
 //===----------------------------------------------------------------------===//
 
 IREE_API_EXPORT void iree_hal_buffer_initialize(
-    iree_allocator_t host_allocator, iree_hal_allocator_t* device_allocator,
-    iree_hal_buffer_t* allocated_buffer, iree_device_size_t allocation_size,
-    iree_device_size_t byte_offset, iree_device_size_t byte_length,
-    iree_hal_memory_type_t memory_type, iree_hal_memory_access_t allowed_access,
+    iree_hal_buffer_placement_t placement, iree_hal_buffer_t* allocated_buffer,
+    iree_device_size_t allocation_size, iree_device_size_t byte_offset,
+    iree_device_size_t byte_length, iree_hal_memory_type_t memory_type,
+    iree_hal_memory_access_t allowed_access,
     iree_hal_buffer_usage_t allowed_usage,
     const iree_hal_buffer_vtable_t* vtable, iree_hal_buffer_t* buffer) {
   iree_hal_resource_initialize(vtable, &buffer->resource);
-  buffer->host_allocator = host_allocator;
-  buffer->device_allocator = device_allocator;
+  buffer->placement = placement;
   buffer->allocated_buffer = allocated_buffer;
   buffer->allocation_size = allocation_size;
   buffer->byte_offset = byte_offset;
@@ -395,8 +238,8 @@ IREE_API_EXPORT void iree_hal_buffer_initialize(
 IREE_API_EXPORT void iree_hal_buffer_recycle(iree_hal_buffer_t* buffer) {
   if (IREE_LIKELY(buffer)) {
     IREE_TRACE_ZONE_BEGIN(z0);
-    if (buffer->device_allocator) {
-      iree_hal_allocator_deallocate_buffer(buffer->device_allocator, buffer);
+    if (buffer->pooling_allocator) {
+      iree_hal_allocator_deallocate_buffer(buffer->pooling_allocator, buffer);
     } else {
       iree_hal_buffer_destroy(buffer);
     }
@@ -558,19 +401,20 @@ IREE_API_EXPORT iree_status_t iree_hal_buffer_calculate_range(
         offset, length, max_length);
   }
 
-  // Handle length as IREE_WHOLE_BUFFER by adjusting it (if allowed).
-  if (IREE_UNLIKELY(length == IREE_WHOLE_BUFFER) &&
+  // Handle length as IREE_HAL_WHOLE_BUFFER by adjusting it (if allowed).
+  if (IREE_UNLIKELY(length == IREE_HAL_WHOLE_BUFFER) &&
       IREE_UNLIKELY(!out_adjusted_length)) {
     *out_adjusted_offset = 0;
-    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "IREE_WHOLE_BUFFER may only be used with buffer "
-                            "ranges, not external pointer ranges");
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "IREE_HAL_WHOLE_BUFFER may only be used with buffer "
+        "ranges, not external pointer ranges");
   }
 
   // Calculate the real ranges adjusted for our region within the allocation.
   iree_device_size_t adjusted_offset = base_offset + offset;
   iree_device_size_t adjusted_length =
-      length == IREE_WHOLE_BUFFER ? max_length - offset : length;
+      length == IREE_HAL_WHOLE_BUFFER ? max_length - offset : length;
   if (adjusted_length == 0) {
     // Fine to have a zero length.
     *out_adjusted_offset = adjusted_offset;
@@ -611,11 +455,11 @@ IREE_API_EXPORT iree_hal_buffer_overlap_t iree_hal_buffer_test_overlap(
   iree_device_size_t rhs_alloc_offset =
       iree_hal_buffer_byte_offset(rhs_buffer) + rhs_offset;
   iree_device_size_t lhs_alloc_length =
-      lhs_length == IREE_WHOLE_BUFFER
+      lhs_length == IREE_HAL_WHOLE_BUFFER
           ? iree_hal_buffer_byte_length(lhs_buffer) - lhs_offset
           : lhs_length;
   iree_device_size_t rhs_alloc_length =
-      rhs_length == IREE_WHOLE_BUFFER
+      rhs_length == IREE_HAL_WHOLE_BUFFER
           ? iree_hal_buffer_byte_length(rhs_buffer) - rhs_offset
           : rhs_length;
   if (!lhs_alloc_length || !rhs_alloc_length) {
@@ -633,13 +477,14 @@ IREE_API_EXPORT iree_hal_buffer_overlap_t iree_hal_buffer_test_overlap(
 
 IREE_API_EXPORT iree_status_t iree_hal_buffer_subspan(
     iree_hal_buffer_t* buffer, iree_device_size_t byte_offset,
-    iree_device_size_t byte_length, iree_hal_buffer_t** out_buffer) {
+    iree_device_size_t byte_length, iree_allocator_t host_allocator,
+    iree_hal_buffer_t** out_buffer) {
   IREE_ASSERT_ARGUMENT(buffer);
   IREE_ASSERT_ARGUMENT(out_buffer);
   *out_buffer = NULL;
 
   // Fast path: if we are requesting the whole buffer (usually via
-  // IREE_WHOLE_BUFFER) then we can just return the buffer itself.
+  // IREE_HAL_WHOLE_BUFFER) then we can just return the buffer itself.
   IREE_RETURN_IF_ERROR(iree_hal_buffer_calculate_range(
       iree_hal_buffer_byte_offset(buffer), iree_hal_buffer_byte_length(buffer),
       byte_offset, byte_length, &byte_offset, &byte_length));
@@ -657,12 +502,11 @@ IREE_API_EXPORT iree_status_t iree_hal_buffer_subspan(
       iree_hal_buffer_allocated_buffer(buffer);
   if (allocated_buffer && allocated_buffer != buffer) {
     return iree_hal_buffer_subspan(allocated_buffer, byte_offset, byte_length,
-                                   out_buffer);
+                                   host_allocator, out_buffer);
   }
 
   return iree_hal_subspan_buffer_create(buffer, byte_offset, byte_length,
-                                        /*device_allocator=*/NULL,
-                                        buffer->host_allocator, out_buffer);
+                                        host_allocator, out_buffer);
 }
 
 IREE_API_EXPORT iree_hal_buffer_t* iree_hal_buffer_allocated_buffer(
@@ -675,6 +519,14 @@ IREE_API_EXPORT iree_device_size_t
 iree_hal_buffer_allocation_size(const iree_hal_buffer_t* buffer) {
   IREE_ASSERT_ARGUMENT(buffer);
   return buffer->allocation_size;
+}
+
+IREE_API_EXPORT iree_hal_buffer_placement_t
+iree_hal_buffer_allocation_placement(const iree_hal_buffer_t* buffer) {
+  IREE_ASSERT_ARGUMENT(buffer);
+  return buffer == buffer->allocated_buffer
+             ? buffer->placement
+             : buffer->allocated_buffer->placement;
 }
 
 IREE_API_EXPORT iree_device_size_t
@@ -746,7 +598,7 @@ IREE_API_EXPORT iree_status_t iree_hal_buffer_map_fill(
       z0, iree_hal_buffer_map_range(buffer, IREE_HAL_MAPPING_MODE_SCOPED,
                                     IREE_HAL_MEMORY_ACCESS_DISCARD_WRITE,
                                     byte_offset, byte_length, &target_mapping));
-  if (byte_length == IREE_WHOLE_BUFFER) {
+  if (byte_length == IREE_HAL_WHOLE_BUFFER) {
     byte_length = target_mapping.contents.data_length;
   }
 
@@ -805,7 +657,7 @@ IREE_API_EXPORT iree_status_t iree_hal_buffer_map_fill(
       !iree_all_bits_set(iree_hal_buffer_memory_type(buffer),
                          IREE_HAL_MEMORY_TYPE_HOST_COHERENT)) {
     status = iree_hal_buffer_mapping_flush_range(&target_mapping, 0,
-                                                 IREE_WHOLE_BUFFER);
+                                                 IREE_HAL_WHOLE_BUFFER);
   }
 
   status =
@@ -862,7 +714,7 @@ IREE_API_EXPORT iree_status_t iree_hal_buffer_map_write(
   if (!iree_all_bits_set(iree_hal_buffer_memory_type(target_buffer),
                          IREE_HAL_MEMORY_TYPE_HOST_COHERENT)) {
     status = iree_hal_buffer_mapping_flush_range(&target_mapping, 0,
-                                                 IREE_WHOLE_BUFFER);
+                                                 IREE_HAL_WHOLE_BUFFER);
   }
 
   iree_hal_buffer_unmap_range(&target_mapping);
@@ -893,14 +745,14 @@ IREE_API_EXPORT iree_status_t iree_hal_buffer_map_copy(
   IREE_TRACE_ZONE_BEGIN(z0);
   IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, data_length);
 
-  // Map source, which may have IREE_WHOLE_BUFFER length.
+  // Map source, which may have IREE_HAL_WHOLE_BUFFER length.
   iree_hal_buffer_mapping_t source_mapping;
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
       z0, iree_hal_buffer_map_range(source_buffer, IREE_HAL_MAPPING_MODE_SCOPED,
                                     IREE_HAL_MEMORY_ACCESS_READ, source_offset,
                                     data_length, &source_mapping));
 
-  // Map target, which may also have IREE_WHOLE_BUFFER length.
+  // Map target, which may also have IREE_HAL_WHOLE_BUFFER length.
   iree_hal_buffer_mapping_t target_mapping;
   iree_status_t status =
       iree_hal_buffer_map_range(target_buffer, IREE_HAL_MAPPING_MODE_SCOPED,
@@ -914,7 +766,7 @@ IREE_API_EXPORT iree_status_t iree_hal_buffer_map_copy(
 
   // Adjust the data length based on the min we have.
   iree_device_size_t adjusted_data_length = 0;
-  if (data_length == IREE_WHOLE_BUFFER) {
+  if (data_length == IREE_HAL_WHOLE_BUFFER) {
     // Whole buffer copy requested - that could mean either, so take the min.
     adjusted_data_length = iree_min(source_mapping.contents.data_length,
                                     target_mapping.contents.data_length);
@@ -926,7 +778,7 @@ IREE_API_EXPORT iree_status_t iree_hal_buffer_map_copy(
   }
 
   // Elide zero length copies. It's been expensive to get to this point just to
-  // bail but we need to have mapped to resolve IREE_WHOLE_BUFFERs that may
+  // bail but we need to have mapped to resolve IREE_HAL_WHOLE_BUFFERs that may
   // result in zero lengths.
   if (IREE_UNLIKELY(adjusted_data_length == 0)) {
     IREE_TRACE_ZONE_END(z0);

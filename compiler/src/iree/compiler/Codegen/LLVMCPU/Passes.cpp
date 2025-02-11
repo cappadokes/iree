@@ -15,6 +15,7 @@
 #include "iree/compiler/Utils/PassUtils.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/CommandLine.h"
+#include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
 #include "mlir/Conversion/ArithToArmSME/ArithToArmSME.h"
 #include "mlir/Conversion/ArmSMEToLLVM/ArmSMEToLLVM.h"
 #include "mlir/Conversion/ArmSMEToSCF/ArmSMEToSCF.h"
@@ -125,6 +126,7 @@ static void addTileAndDistributePasses(OpPassManager &funcPassManager) {
   funcPassManager.addPass(createCSEPass());
   funcPassManager.addPass(createFuseTensorPadWithConsumerPass());
   funcPassManager.addPass(createConcretizePadResultShapePass());
+  funcPassManager.addPass(createPropagateDispatchSizeBoundsPass());
 }
 
 //===---------------------------------------------------------------------===//
@@ -318,7 +320,7 @@ void buildLLVMCPUVectorLoweringPipeline(
   // lower them and can't be optimized away anymore.
   funcPassManager.addPass(createCanonicalizerPass());
 
-  LLVMCPUVectorTransferLoweringPassOptions transferLoweringOptions{};
+  VectorTransferLoweringPassOptions transferLoweringOptions{};
   if (!options.enableArmSME) {
     // The ArmSME dialect has its own (more specific) lowerings for scalable
     // vectors that occur later in the pipeline, so only enable the general
@@ -326,7 +328,7 @@ void buildLLVMCPUVectorLoweringPipeline(
     transferLoweringOptions.enableScalableLowerings = true;
   }
   funcPassManager.addPass(
-      createLLVMCPUVectorTransferLoweringPass(transferLoweringOptions));
+      createVectorTransferLoweringPass(transferLoweringOptions));
   funcPassManager.addPass(createLLVMCPUVectorTransposeLoweringPass(
       LLVMCPUVectorTransposeLoweringPassOptions{
           options.lowerVectorTransposeToAVX2}));
@@ -405,11 +407,11 @@ void addMultiTilingExpertPassPipeline(OpPassManager &funcPassManager,
         // SplitReductionPass takes care of banked-tiling.
         funcPassManager.addPass(
             createLLVMCPUSplitReductionPass(clEnableReassociateFpReductions));
-        funcPassManager.addPass(createLLVMCPUTilePass(i));
+        funcPassManager.addPass(createLLVMCPUTileRootAndFuseInputOperands(i));
         continue;
       }
 
-      funcPassManager.addPass(createLLVMCPUTilePass(i));
+      funcPassManager.addPass(createLLVMCPUTileRootAndFuseInputOperands(i));
     }
   }
 
@@ -446,6 +448,7 @@ void addMultiTilingExpertPassPipeline(OpPassManager &funcPassManager,
   addCPUBufferizePasses(funcPassManager);
 
   // Run IREE specific passes before vector lowering expert.
+  funcPassManager.addPass(createPropagateDispatchSizeBoundsPass());
   funcPassManager.addPass(createRemoveSingleIterationLoopPass());
 
   {
@@ -509,6 +512,7 @@ void addConvTileAndDecomposeExpertPassPipeline(
   addCPUBufferizePasses(funcPassManager);
 
   // Run IREE specific passes before vector lowering expert.
+  funcPassManager.addPass(createPropagateDispatchSizeBoundsPass());
   funcPassManager.addPass(createRemoveSingleIterationLoopPass());
 
   {
@@ -526,14 +530,14 @@ void addMmt4dTilingExpertPassPipeline(OpPassManager &funcPassManager,
                                       LLVMCPUPipelineOptions &pipelineOpt) {
   addTileAndDistributePasses(funcPassManager);
 
-  funcPassManager.addPass(createLLVMCPUTileAndFusePass(
+  funcPassManager.addPass(createLLVMCPUTileRootAndFuseProducerConsumer(
       static_cast<int64_t>(tilingConfig.getVectorCommonParallelLevel())));
   // The below two passes are nop if the "mmt4d" is explicitly excluded in the
   // ukernels attribute.
   funcPassManager.addPass(createCPUPrepareUkernelsPass());
   funcPassManager.addPass(
       createCPULowerToUKernelsPass(clSkipIntermediateRoundings));
-  funcPassManager.addPass(createLLVMCPUTilePass(
+  funcPassManager.addPass(createLLVMCPUTileRootAndFuseInputOperands(
       static_cast<int64_t>(tilingConfig.getVectorReductionLevel())));
 
   {
@@ -730,9 +734,24 @@ static void addLowerToLLVMPasses(OpPassManager &modulePassManager,
         .addPass(mlir::createConvertArmSMEToSCFPass);
   }
 
+  VectorTransferLoweringPassOptions transferLoweringOptions;
+  if (!enableAArch64SME) {
+    // The ArmSME dialect has its own (more specific) lowerings for scalable
+    // vectors that occur later in the pipeline, so only enable the general
+    // lowerings if SME is not available.
+    transferLoweringOptions.enableScalableLowerings = true;
+  }
+
   FunctionLikeNest(modulePassManager)
-      // Resolve get_buffer_descriptor ops. All structural buffer manipulations
-      // must conclude before this point.
+      // All structural buffer manipulations must conclude before this point.
+
+      // The subview folding doesn't like potentially-out-of-bounds
+      // vector.transfer_read and vector.transfer_write, lower them to loads and
+      // stores here.
+      .addPass([&]() {
+        return createVectorTransferLoweringPass(transferLoweringOptions);
+      })
+      .addPass(memref::createFoldMemRefAliasOpsPass)
       .addPass(createIREEExpandStridedMetadataPass)
       .addPass(createCleanupBufferAllocViewPass)
       // Checking stack allocation before converting to CF dialect is easier.
@@ -787,7 +806,7 @@ void buildLLVMCPUCodegenConfigurationPassPipelineImpl(
       // TODO(#13888): This(createExpandF16OpToF32Pass()) pass is being added
       // way to late and should insted be be done during lowering to LLVM.
       .addPass(createExpandF16OpToF32Pass)
-      .addPass(createCPUMaterializeDeviceEncodingPass)
+      .addPass(createMaterializeDeviceEncodingPass)
       // TODO: Remove the following pass the plumb support for
       // #hal.descriptor_type memory space through the stack.
       .addPass(createEraseHALDescriptorTypeFromMemRefPass);
@@ -813,10 +832,12 @@ void buildLLVMCPUCodegenPassPipeline(OpPassManager &variantPassManager,
     OpPassManager &modulePassManager = variantPassManager.nest<ModuleOp>();
     modulePassManager.addPass(createLowerExecutableUsingTransformDialectPass());
     FunctionLikeNest(modulePassManager)
-        .addPass(createLLVMCPULowerExecutableTargetPass);
+        .addPass(createLLVMCPULowerExecutableTargetPass)
+        .addPass(createVerifyWorkgroupDistributionPass);
   }
 
   variantPassManager.addPass(createReconcileTranslationInfoPass());
+  variantPassManager.addPass(createLowerAffinePass());
   variantPassManager.addPass(IREE::Util::createDropCompilerHintsPass());
 
   // Run conversion to LLVM at `ModuleOp` granularity.

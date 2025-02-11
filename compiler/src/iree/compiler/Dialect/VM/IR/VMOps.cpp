@@ -153,15 +153,15 @@ void FuncOp::setReflectionAttr(StringRef name, Attribute value) {
     llvm::append_range(attrs, existingAttr);
   }
   bool didFind = false;
-  for (size_t i = 0; i < attrs.size(); ++i) {
-    if (attrs[i].getName() == name) {
-      attrs[i].setValue(value);
+  for (NamedAttribute &attr : attrs) {
+    if (attr.getName() == name) {
+      attr.setValue(value);
       didFind = true;
       break;
     }
   }
   if (!didFind) {
-    attrs.push_back(NamedAttribute(StringAttr::get(getContext(), name), value));
+    attrs.emplace_back(name, value);
     DictionaryAttr::sortInPlace(attrs);
   }
   getOperation()->setAttr("iree.reflection",
@@ -611,11 +611,11 @@ static TypedAttr convertConstIntegerValue(TypedAttr value) {
 static FloatType getFloatType(int bitwidth, MLIRContext *context) {
   switch (bitwidth) {
   case 16:
-    return FloatType::getF16(context);
+    return Float16Type::get(context);
   case 32:
-    return FloatType::getF32(context);
+    return Float32Type::get(context);
   case 64:
-    return FloatType::getF64(context);
+    return Float64Type::get(context);
   default:
     assert(false && "unhandled floating point type");
     return {};

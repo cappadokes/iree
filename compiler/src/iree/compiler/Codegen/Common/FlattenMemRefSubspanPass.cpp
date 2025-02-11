@@ -96,7 +96,7 @@ struct FlattenMemRefTypeConverter final : public TypeConverter {
     addConversion([](MemRefType type) -> std::optional<Type> {
       int64_t offset;
       SmallVector<int64_t> strides;
-      if (failed(getStridesAndOffset(type, strides, offset))) {
+      if (failed(type.getStridesAndOffset(strides, offset))) {
         return nullptr;
       }
       // Since the memref gets linearized, use a stride 1, offset 0.
@@ -354,7 +354,7 @@ static Value linearizeIndices(Value sourceValue, ValueRange indices,
   // dynamic.
   SmallVector<int64_t> strides;
   int64_t offset;
-  if (succeeded(getStridesAndOffset(sourceType, strides, offset))) {
+  if (succeeded(sourceType.getStridesAndOffset(strides, offset))) {
     // The memref itself might have an offset, but we should not account for it
     // when computing the linearization. The original memref might be
     // `memref<?x?xf32, strided<[?, ?], offset: ?>`
@@ -757,7 +757,7 @@ struct FlattenMemRefSubspanPass final
     // This pass currently doesn't support alignment hints so remove them first.
     RewritePatternSet patterns(context);
     patterns.add<RemoveAssumeAlignOp>(context);
-    (void)applyPatternsAndFoldGreedily(getOperation(), std::move(patterns));
+    (void)applyPatternsGreedily(getOperation(), std::move(patterns));
 
     RewritePatternSet flattenPatterns(context);
 
@@ -879,8 +879,8 @@ struct FlattenMemRefSubspanPass final
     // Fold subviews if any new oportuinity has been created.
     RewritePatternSet foldSubviewPatterns(context);
     memref::populateFoldMemRefAliasOpPatterns(foldSubviewPatterns);
-    if (failed(applyPatternsAndFoldGreedily(getOperation(),
-                                            std::move(foldSubviewPatterns)))) {
+    if (failed(applyPatternsGreedily(getOperation(),
+                                     std::move(foldSubviewPatterns)))) {
       return signalPassFailure();
     }
 
@@ -894,8 +894,8 @@ struct FlattenMemRefSubspanPass final
     memref::SubViewOp::getCanonicalizationPatterns(cleanupPatterns, context);
     cleanupPatterns.add<RemoveDynamicCastOp>(context);
 
-    if (failed(applyPatternsAndFoldGreedily(getOperation(),
-                                            std::move(cleanupPatterns)))) {
+    if (failed(applyPatternsGreedily(getOperation(),
+                                     std::move(cleanupPatterns)))) {
       return signalPassFailure();
     }
   }

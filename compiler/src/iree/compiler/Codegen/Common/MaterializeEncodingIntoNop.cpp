@@ -7,8 +7,8 @@
 #include "iree/compiler/Codegen/Common/EncodingUtils.h"
 #include "iree/compiler/Codegen/Common/PassUtils.h"
 #include "iree/compiler/Codegen/Common/Passes.h"
-#include "iree/compiler/Dialect/Encoding/IR/EncodingOps.h"
-#include "iree/compiler/Dialect/HAL/IR/HALTypes.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenDialect.h"
 #include "mlir/Dialect/MemRef/Transforms/Transforms.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Pass/PassManager.h"
@@ -22,21 +22,20 @@ namespace mlir::iree_compiler {
 #include "iree/compiler/Codegen/Common/Passes.h.inc"
 
 using namespace IREE::Encoding;
+using IREE::Codegen::MaterializeEncodingInfo;
 
 namespace {
 struct MaterializeEncodingIntoNopPass final
     : impl::MaterializeEncodingIntoNopPassBase<MaterializeEncodingIntoNopPass> {
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<linalg::LinalgDialect, tensor::TensorDialect>();
+    registry.insert<linalg::LinalgDialect, tensor::TensorDialect,
+                    IREE::Codegen::IREECodegenDialect>();
   }
 
   void runOnOperation() override {
     MLIRContext *context = &getContext();
-    auto operation = getOperation();
+    FunctionOpInterface operation = getOperation();
 
-    auto materializeEncodingFn = [](RankedTensorType,
-                                    IREE::HAL::ExecutableTargetAttr)
-        -> FailureOr<MaterializeEncodingInfo> { return failure(); };
     auto materializeEncodingValueFn =
         [](RankedTensorType, OpBuilder &,
            Location) -> FailureOr<MaterializeEncodingValueInfo> {
@@ -45,14 +44,11 @@ struct MaterializeEncodingIntoNopPass final
 
     RewritePatternSet materializeEncodingPattern(context);
     MaterializeEncodingTypeConverter typeConverter(
-        materializeEncodingFn, IREE::HAL::ExecutableTargetAttr(),
-        /*transposeNarrowN=*/false);
+        IREE::Codegen::EncodingNopLayoutAttr::get(context));
     MaterializeEncodingConversionTarget target(*context);
-    populateMaterializeEncodingIntoPackUnPackPatterns(
-        materializeEncodingPattern, typeConverter, materializeEncodingValueFn);
-    populateShapeIndependentMaterializeEncodingPatterns(
-        materializeEncodingPattern, target, typeConverter,
-        materializeEncodingValueFn);
+    populateMaterializeEncodingPatterns(materializeEncodingPattern, target,
+                                        typeConverter,
+                                        materializeEncodingValueFn);
 
     if (failed(applyPartialConversion(operation, target,
                                       std::move(materializeEncodingPattern)))) {
@@ -66,8 +62,7 @@ struct MaterializeEncodingIntoNopPass final
       memref::populateResolveRankedShapedTypeResultDimsPatterns(patterns);
       context->getOrLoadDialect<tensor::TensorDialect>()
           ->getCanonicalizationPatterns(patterns);
-      if (failed(
-              applyPatternsAndFoldGreedily(operation, std::move(patterns)))) {
+      if (failed(applyPatternsGreedily(operation, std::move(patterns)))) {
         operation.emitOpError("folding patterns failed");
         return signalPassFailure();
       }

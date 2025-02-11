@@ -983,7 +983,7 @@ def FLOW_CallOp : FLOW_Op<"call", [
   let builders = [
     OpBuilder<(ins
       "SymbolRefAttr":$callee,
-      "TypeRange":$resultTypes,
+      "TypeRange":$resultTypes, "ValueRange":$resultDims,
       "ValueRange":$arguments,
       "ArrayAttr":$tiedOperands,
       CArg<"ArrayRef<NamedAttribute>", "{}">:$attributes)>,
@@ -1013,7 +1013,7 @@ def FLOW_CallOp : FLOW_Op<"call", [
 
     /// Set the callee for this operation.
     void setCalleeFromCallable(CallInterfaceCallable callee) {
-      (*this)->setAttr("callee", callee.get<SymbolRefAttr>());
+      (*this)->setAttr("callee", cast<SymbolRefAttr>(callee));
     }
 
     ValueRange getOperandDynamicDims(unsigned idx) {
@@ -1269,7 +1269,7 @@ def FLOW_TensorLoadOp : FLOW_PureOp<"tensor.load", [
     Variadic<FLOW_Dim>:$indices
   );
   let results = (outs
-    AnyTypeOf<[FLOW_PrimitiveType, AnyVector]>:$result
+    AnyTypeOf<[FLOW_PrimitiveType, AnyVectorOfNonZeroRank]>:$result
   );
 
   let assemblyFormat = [{
@@ -1315,7 +1315,7 @@ def FLOW_TensorStoreOp : FLOW_PureOp<"tensor.store", [
   }];
 
   let arguments = (ins
-    AnyTypeOf<[FLOW_PrimitiveType, AnyVector]>:$value,
+    AnyTypeOf<[FLOW_PrimitiveType, AnyVectorOfNonZeroRank]>:$value,
     FLOW_Tensor:$target,
     FLOW_ShapeDynamicDims:$target_dims,
     Variadic<FLOW_Dim>:$indices
@@ -1469,14 +1469,14 @@ def FLOW_TensorCloneOp : FLOW_PureOp<"tensor.clone", [
 
   let arguments = (ins
     FLOW_Tensor:$operand,
-    FLOW_ShapeDynamicDims:$argument_dims
+    FLOW_ShapeDynamicDims:$operand_dims
   );
   let results = (outs
     FLOW_Tensor:$result
   );
 
   let assemblyFormat = [{
-    $operand `:` type($result) (`{` $argument_dims^ `}`)?
+    $operand `:` type($result) (`{` $operand_dims^ `}`)?
     attr-dict-with-keyword
   }];
 
@@ -1493,13 +1493,69 @@ def FLOW_TensorCloneOp : FLOW_PureOp<"tensor.clone", [
   let extraClassDeclaration = [{
     bool isHoistableLeafOp() { return false; }
 
-    ValueRange getOperandDynamicDims(unsigned idx) { return getArgumentDims(); }
-    ValueRange getResultDynamicDims(unsigned idx) { return getArgumentDims(); }
+    ValueRange getOperandDynamicDims(unsigned idx) { return getOperandDims(); }
+    ValueRange getResultDynamicDims(unsigned idx) { return getOperandDims(); }
   }];
 
   let hasVerifier = 1;
   let hasCanonicalizer = 1;
   let hasFolder = 1;
+}
+
+def FLOW_TensorBarrierOp : FLOW_PureOp<"tensor.barrier", [
+  AllTypesMatch<["operand", "result"]>,
+  DeclareOpInterfaceMethods<Util_HoistableOpInterface>,
+  Util_ShapeAwareOp,
+  DeclareOpInterfaceMethods<Util_TiedOpInterface, [
+      "getTiedResult",
+      "getTiedResultOperand",
+      "getTiedResultOperandIndex",
+      "getTiedResultOperandIndices",
+  ]>,
+]> {
+  let summary = [{indicates a value that must have a specific affinity}];
+  let description = [{
+    Prevents fusion and scheduling of a value across an affinity boundary.
+    May introduce copy-on-write behavior if the operand value is used as well as
+    the result and users should try to keep the operand to a single use by this
+    op.
+  }];
+
+  let arguments = (ins
+    FLOW_Tensor:$operand,
+    FLOW_ShapeDynamicDims:$operand_dims,
+    AnyAttr:$target
+  );
+  let results = (outs
+    FLOW_Tensor:$result
+  );
+
+  let assemblyFormat = [{
+    $operand `:` type($result) (`{` $operand_dims^ `}`)?
+    `on` $target
+    attr-dict-with-keyword
+  }];
+
+  let builders = [
+    OpBuilder<(ins "Value":$operand, "Attribute":$target),
+    [{
+      build($_builder, $_state,
+          operand.getType(),
+          operand,
+          IREE::Util::buildDynamicDimsForValue($_state.location, operand, $_builder),
+          target);
+    }]>,
+  ];
+
+  let extraClassDeclaration = [{
+    bool isHoistableLeafOp() { return false; }
+
+    ValueRange getOperandDynamicDims(unsigned idx) { return getOperandDims(); }
+    ValueRange getResultDynamicDims(unsigned idx) { return getOperandDims(); }
+  }];
+
+  let hasVerifier = 1;
+  let hasCanonicalizer = 1;
 }
 
 def FLOW_TensorTransferOp : FLOW_PureOp<"tensor.transfer", [
@@ -1518,7 +1574,7 @@ def FLOW_TensorTransferOp : FLOW_PureOp<"tensor.transfer", [
 
   let arguments = (ins
     FLOW_Tensor:$operand,
-    FLOW_ShapeDynamicDims:$argument_dims,
+    FLOW_ShapeDynamicDims:$operand_dims,
     AnyAttr:$target
   );
   let results = (outs
@@ -1526,7 +1582,7 @@ def FLOW_TensorTransferOp : FLOW_PureOp<"tensor.transfer", [
   );
 
   let assemblyFormat = [{
-    $operand `:` type($result) (`{` $argument_dims^ `}`)?
+    $operand `:` type($result) (`{` $operand_dims^ `}`)?
     `to` $target
     attr-dict-with-keyword
   }];
@@ -1545,8 +1601,8 @@ def FLOW_TensorTransferOp : FLOW_PureOp<"tensor.transfer", [
   let extraClassDeclaration = [{
     bool isHoistableLeafOp() { return false; }
 
-    ValueRange getOperandDynamicDims(unsigned idx) { return getArgumentDims(); }
-    ValueRange getResultDynamicDims(unsigned idx) { return getArgumentDims(); }
+    ValueRange getOperandDynamicDims(unsigned idx) { return getOperandDims(); }
+    ValueRange getResultDynamicDims(unsigned idx) { return getOperandDims(); }
   }];
 
   let hasVerifier = 1;

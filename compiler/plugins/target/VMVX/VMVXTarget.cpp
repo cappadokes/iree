@@ -4,6 +4,7 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include "iree/compiler/Codegen/Dialect/CPU/IR/IREECPUDialect.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenDialect.h"
 #include "iree/compiler/Codegen/VMVX/Passes.h"
 #include "iree/compiler/Dialect/HAL/Target/Devices/LocalDevice.h"
@@ -43,15 +44,12 @@ static IREE::HAL::ExecutableTargetAttr
 getVMVXExecutableTarget(bool enableMicrokernels, MLIRContext *context,
                         StringRef backend, StringRef format) {
   Builder b(context);
-  SmallVector<NamedAttribute> configItems;
-
-  configItems.emplace_back(
-      b.getStringAttr("ukernels"),
-      b.getStringAttr(enableMicrokernels ? "all" : "none"));
+  NamedAttribute configItem(
+      "ukernels", b.getStringAttr(enableMicrokernels ? "all" : "none"));
 
   return b.getAttr<IREE::HAL::ExecutableTargetAttr>(
       b.getStringAttr(backend), b.getStringAttr(format),
-      b.getDictionaryAttr(configItems));
+      b.getDictionaryAttr(configItem));
 }
 
 class VMVXTargetBackend final : public TargetBackend {
@@ -77,9 +75,10 @@ public:
   }
 
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<IREE::Codegen::IREECodegenDialect, IREE::VM::VMDialect,
-                    IREE::VMVX::VMVXDialect,
-                    IREE::LinalgExt::IREELinalgExtDialect>();
+    registry
+        .insert<IREE::Codegen::IREECodegenDialect, IREE::CPU::IREECPUDialect,
+                IREE::VM::VMDialect, IREE::VMVX::VMVXDialect,
+                IREE::LinalgExt::IREELinalgExtDialect>();
   }
 
   IREE::VM::TargetOptions
@@ -198,9 +197,7 @@ public:
   getDefaultDeviceTarget(MLIRContext *context,
                          const TargetRegistry &targetRegistry) const override {
     Builder b(context);
-    SmallVector<NamedAttribute> configItems;
-
-    auto configAttr = b.getDictionaryAttr(configItems);
+    auto configAttr = b.getDictionaryAttr({});
 
     // If we had multiple target environments we would generate one target attr
     // per environment, with each setting its own environment attribute.
@@ -232,8 +229,8 @@ public:
   }
 
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry
-        .insert<IREE::Codegen::IREECodegenDialect, IREE::VMVX::VMVXDialect>();
+    registry.insert<IREE::Codegen::IREECodegenDialect,
+                    IREE::CPU::IREECPUDialect, IREE::VMVX::VMVXDialect>();
   }
 
   void

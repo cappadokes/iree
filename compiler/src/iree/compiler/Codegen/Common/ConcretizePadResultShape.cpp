@@ -37,7 +37,7 @@ static Value getAsIndexValue(OpFoldResult attrOrValue, OpBuilder &builder,
       return val;
     matchPattern(val, m_Constant(&attr));
   } else {
-    attr = llvm::cast<IntegerAttr>(attrOrValue.get<Attribute>());
+    attr = llvm::cast<IntegerAttr>(cast<Attribute>(attrOrValue));
   }
   return builder.createOrFold<arith::ConstantIndexOp>(
       loc, attr.getValue().getSExtValue());
@@ -136,14 +136,14 @@ public:
     MLIRContext *context = &getContext();
     auto funcOp = getOperation();
 
+    ConfigTrackingListener listener;
+    GreedyRewriteConfig config;
+    config.listener = &listener;
+
     {
       RewritePatternSet patterns(context);
       populateConcretizePadResultShapePatterns(patterns);
-      GreedyRewriteConfig config;
-      auto listener = ConfigTrackingListener();
-      config.listener = &listener;
-      if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns),
-                                              config))) {
+      if (failed(applyPatternsGreedily(funcOp, std::move(patterns), config))) {
         return signalPassFailure();
       }
     }

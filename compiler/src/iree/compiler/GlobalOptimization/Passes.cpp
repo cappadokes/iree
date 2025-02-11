@@ -29,12 +29,15 @@ static llvm::cl::opt<bool> clEnableFuseSiluHorizontalMatmul(
     llvm::cl::desc(
         "Enables fusing specifically structured matmuls (experimental)."),
     llvm::cl::init(false));
-// TODO(#15973): Make default to true after fixing the CPU DT regression.
 static llvm::cl::opt<bool> clEnableTransposePropagation(
     "iree-global-opt-propagate-transposes",
     llvm::cl::desc(
         "Enables propagation of transpose ops to improve fusion chances."),
-    llvm::cl::init(false));
+    llvm::cl::init(true));
+static llvm::cl::opt<bool> clEnableAttentionVTranspose(
+    "iree-global-opt-enable-attention-v-transpose",
+    llvm::cl::desc("Enables transposition of v operand of attention ops,"),
+    llvm::cl::init(true));
 
 // TODO(hanchung): Remove the flag. We don't want to do early materialization by
 // default. Because it won't work for heterogeneous computing. This is not the
@@ -131,7 +134,11 @@ void buildGlobalOptimizationPassPipeline(
       // dims as the unit dim folding pass updates indexing maps and is better
       // at working with generics. By this point we have already done any
       // specialized raising and the op names are no longer useful.
-      .addPass(createGeneralizeLinalgNamedOpsPass);
+      .addPass([&]() {
+        GeneralizeLinalgNamedOpsPassOptions opt;
+        opt.enableGeneralizeMatmul = transformOptions.options.generalizeMatmul;
+        return createGeneralizeLinalgNamedOpsPass(opt);
+      });
 
   mainPassManager.addPass(DispatchCreation::createFoldUnitExtentDimsPass());
   FunctionLikeNest(mainPassManager)
@@ -154,8 +161,11 @@ void buildGlobalOptimizationPassPipeline(
       .addPredicatedPass(
           clEnableTransposePropagation,
           [&]() {
-            return createPropagateLinalgTransposePass(
-                transformOptions.options.aggressiveTransposePropagation);
+            PropagateLinalgTransposePassOptions options;
+            options.enableAggressivePropagation =
+                transformOptions.options.aggressiveTransposePropagation;
+            options.enableAttentionVTranspose = clEnableAttentionVTranspose;
+            return createPropagateLinalgTransposePass(options);
           })
       .addPass(IREE::Flow::createCanonicalizerPass)
       .addPass(mlir::createCSEPass);

@@ -86,6 +86,7 @@ iree_cc_library(
     "CleanupBufferAllocViewPass.cpp"
     "ConcretizePadResultShape.cpp"
     "ConfigTrackingCanonicalizer.cpp"
+    "ConvertAccGEMMToGEMMPass.cpp"
     "ConvertBf16ArithToF32.cpp"
     "ConvertBf16ToUInt16Buffers.cpp"
     "ConvertToDestinationPassingStylePass.cpp"
@@ -114,10 +115,13 @@ iree_cc_library(
     "IREEExpandStridedMetadata.cpp"
     "IREELoopInvariantCodeMotion.cpp"
     "InstrumentMemoryAccesses.cpp"
+    "LinkTuningSpecsPass.cpp"
     "LowerExecutableUsingTransformDialect.cpp"
     "LowerUKernelsToCalls.cpp"
+    "MaterializeEncoding.cpp"
     "MaterializeEncodingIntoNop.cpp"
-    "MaterializeEncodingIntoPackUnPack.cpp"
+    "MaterializeEncodingPatterns.cpp"
+    "MaterializeTuningSpecsPass.cpp"
     "MemrefCopyToLinalg.cpp"
     "NormalizeLoopBounds.cpp"
     "OptimizeTensorInsertExtractSlices.cpp"
@@ -126,6 +130,7 @@ iree_cc_library(
     "PassUtils.cpp"
     "Passes.cpp"
     "PolynomialApproximationPass.cpp"
+    "PropagateDispatchSizeBounds.cpp"
     "PropagateReshapesByExpansion.cpp"
     "ReconcileTranslationInfo.cpp"
     "RematerializeParallelOps.cpp"
@@ -142,10 +147,13 @@ iree_cc_library(
     "TileDispatchUsingInterface.cpp"
     "TileLargeTensors.cpp"
     "TileSizeSelection.cpp"
+    "Transforms.cpp"
     "TypePropagationPass.cpp"
     "UnrollAnnotatedLoops.cpp"
     "UserConfig.cpp"
+    "VectorTransferLowering.cpp"
     "VectorizeMemrefCopy.cpp"
+    "VerifyWorkgroupDistribution.cpp"
   DEPS
     ::PassHeaders
     ::PassesIncGen
@@ -161,6 +169,7 @@ iree_cc_library(
     MLIRArithUtils
     MLIRBufferizationDialect
     MLIRBufferizationTransforms
+    MLIRBytecodeWriter
     MLIRDestinationStyleOpInterface
     MLIRFuncDialect
     MLIRFuncTransforms
@@ -178,6 +187,7 @@ iree_cc_library(
     MLIRMemRefDialect
     MLIRMemRefTransforms
     MLIRMemRefUtils
+    MLIRParser
     MLIRPass
     MLIRSCFDialect
     MLIRSCFToControlFlow
@@ -195,11 +205,14 @@ iree_cc_library(
     MLIRTransforms
     MLIRValueBoundsOpInterface
     MLIRVectorDialect
+    MLIRVectorToSCF
     MLIRVectorTransforms
     MLIRViewLikeInterface
     iree::compiler::Codegen::Common::FoldTensorExtractOpIncGen
-    iree::compiler::Codegen::Common::TileSwizzle
+    iree::compiler::Codegen::Dialect::CPU::IR::IREECPUDialect
     iree::compiler::Codegen::Dialect::Codegen::IR::IREECodegenDialect
+    iree::compiler::Codegen::Dialect::Codegen::Utils
+    iree::compiler::Codegen::Dialect::GPU::IR::IREEGPUDialect
     iree::compiler::Codegen::Dialect::VectorExt::IR::IREEVectorExtDialect
     iree::compiler::Codegen::Interfaces::BufferizationInterfaces
     iree::compiler::Codegen::Interfaces::PartitionableLoopsInterface
@@ -208,24 +221,14 @@ iree_cc_library(
     iree::compiler::Codegen::Utils
     iree::compiler::Dialect::Encoding::IR
     iree::compiler::Dialect::Flow::IR
+    iree::compiler::Dialect::HAL::Analysis
     iree::compiler::Dialect::HAL::IR
     iree::compiler::Dialect::LinalgExt::IR
     iree::compiler::Dialect::LinalgExt::Transforms
+    iree::compiler::Dialect::Stream::Analysis
     iree::compiler::Dialect::Util::Analysis
     iree::compiler::Dialect::Util::IR
     iree::compiler::Utils
-  PUBLIC
-)
-
-iree_cc_library(
-  NAME
-    TileSwizzle
-  HDRS
-    "TileSwizzle.h"
-  SRCS
-    "TileSwizzle.cpp"
-  DEPS
-    LLVMSupport
   PUBLIC
 )
 
@@ -267,6 +270,7 @@ iree_cc_library(
     MLIRMemRefTransformOps
     MLIRPDLDialect
     MLIRPDLInterpDialect
+    MLIRParser
     MLIRPass
     MLIRRewrite
     MLIRSCFDialect

@@ -19,6 +19,19 @@ void populateFuseLinalgExtOpsWithTransposes(
     RewritePatternSet &patterns,
     const linalg::ControlFusionFn &controlFusionFn);
 
+/// Bubble up transpose-like ops from LinalgExt ops (only `AttentionOp`
+/// supported).
+void populateBubbleTransposeFromLinalgExtOps(
+    RewritePatternSet &patterns,
+    const linalg::ControlFusionFn &controlFusionFn);
+
+/// Default function to drop unit dims for for linalgext ops.
+SmallVector<unsigned> defaultControlDropUnitDims(Operation *op);
+
+/// Drop unit extent dims from linalg ext ops
+void populateFoldUnitExtentDimsPatterns(
+    RewritePatternSet &patterns, const linalg::ControlDropUnitDims &options);
+
 /// Helper struct to hold the results of collapsing an operation.
 struct CollapseResult {
   SmallVector<Value> results;

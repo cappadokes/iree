@@ -6,6 +6,7 @@
 
 #include "iree_pjrt/common/api_impl.h"
 
+#include <iterator>
 #include <optional>
 #include <sstream>
 #include <utility>
@@ -590,8 +591,8 @@ iree_status_t BufferInstance::CopyToHost(void* dst, iree_host_size_t dst_size,
       device_.device(), IREE_HAL_QUEUE_AFFINITY_ANY,
       /*wait_semaphore_list=*/iree_hal_fence_semaphore_list(ready_fence_.get()),
       /*signal_semaphore_list=*/
-      iree_hal_fence_semaphore_list(dst_buffer_ready_fence.get()), transfer_cb,
-      iree_hal_buffer_binding_table_empty()));
+      iree_hal_fence_semaphore_list(dst_buffer_ready_fence.get()),
+      transfer_cb.get()));
 
   *out_done_event = copy_done_event;
   return iree_ok_status();
@@ -836,9 +837,8 @@ iree_status_t DeviceInstance::HostBufferToDeviceSplat(
       /*binding_capacity=*/0, &transfer_cb));
   IREE_CHECK_OK(iree_hal_command_buffer_begin(transfer_cb.get()));
   IREE_RETURN_IF_ERROR(iree_hal_command_buffer_fill_buffer(
-      transfer_cb.get(), buffer.get(), /*target_offset=*/0,
-      /*target_size=*/byte_length, data, element_type_byte_size,
-      IREE_HAL_FILL_FLAG_NONE));
+      transfer_cb.get(), iree_hal_make_buffer_ref(buffer.get(), 0, byte_length),
+      data, element_type_byte_size, IREE_HAL_FILL_FLAG_NONE));
   IREE_CHECK_OK(iree_hal_command_buffer_end(transfer_cb.get()));
 
   // Execute the enqueued splat:
@@ -847,8 +847,7 @@ iree_status_t DeviceInstance::HostBufferToDeviceSplat(
       /*wait_semaphore_list=*/
       {1, &transfer_timeline_, &signal_alloca_complete},
       /*signal_semaphore_list=*/
-      {1, &transfer_timeline_, &signal_copy_complete}, transfer_cb,
-      iree_hal_buffer_binding_table_empty()));
+      {1, &transfer_timeline_, &signal_copy_complete}, transfer_cb.get()));
 
   // Wrap in a buffer view and return:
   iree::vm::ref<iree_hal_buffer_view_t> result_buffer_view;
@@ -1004,7 +1003,7 @@ iree_status_t DeviceInstance::TransposeBroadcastDeviceBuffer(
 
   // Compile program and check for errors:
   LoadedExecutableInstance* executable;
-  auto* error = this->client().Compile(&program, &executable);
+  auto* error = this->client().Compile(&program, {}, &executable);
   if (error) {
     auto errinst = ErrorInstance::FromError(error);
     auto ret = iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
@@ -1191,8 +1190,7 @@ iree_status_t DeviceInstance::HostBufferToDevice(
       /*wait_semaphore_list=*/
       {1, &transfer_timeline_, &signal_alloca_complete},
       /*signal_semaphore_list=*/
-      {1, &transfer_timeline_, &signal_copy_complete}, transfer_cb,
-      iree_hal_buffer_binding_table_empty()));
+      {1, &transfer_timeline_, &signal_copy_complete}, transfer_cb.get()));
 
   // Wrap in a buffer view and return.
   iree::vm::ref<iree_hal_buffer_view_t> result_buffer_view;
@@ -1354,22 +1352,14 @@ void ClientInstance::BindApi(PJRT_Api* api) {
     LoadedExecutableInstance* executable;
 
     // Read compilation options.
-    // TODO: Port CompileOptionsProto into the project or leave ommitted.
-    // xla::CompileOptionsProto options_proto;
-    // if (!options_proto.ParseFromArray(args->compile_options,
-    //                                   args->compile_options_size)) {
-    //   return MakeError(iree_make_status(IREE_STATUS_INTERNAL,
-    //                                     "could not parse compilation
-    //                                     options"));
-    // }
-    // auto options = xla::CompileOptions::FromProto(options_proto);
-    // if (!options.ok()) {
-    //   return MakeError(
-    //       iree_make_status(IREE_STATUS_INTERNAL,
-    //                        std::string(options.status().message()).c_str()));
-    // }
+    xla::CompileOptionsProto options_proto;
+    if (!options_proto.ParseFromArray(args->compile_options,
+                                      args->compile_options_size)) {
+      return MakeError(iree_make_status(IREE_STATUS_INTERNAL,
+                                        "could not parse compilation options"));
+    }
 
-    auto* error = client->Compile(args->program, /**options,*/ &executable);
+    auto* error = client->Compile(args->program, options_proto, &executable);
     if (error) return error;
     args->executable = *executable;
     return nullptr;
@@ -1454,7 +1444,7 @@ iree_status_t ClientInstance::PopulateDevices() {
 }
 
 PJRT_Error* ClientInstance::Compile(const PJRT_Program* program,
-                                    /*xla::CompileOptions options,*/
+                                    xla::CompileOptionsProto options,
                                     LoadedExecutableInstance** out_executable) {
   std::unique_ptr<ArtifactDumper::Transaction> artifact_tx;
   if (platform().artifact_dumper().enabled()) {
@@ -1497,8 +1487,8 @@ PJRT_Error* ClientInstance::Compile(const PJRT_Program* program,
     }
 
     // Set flags.
-    // TODO: Plumb CompileOptions through.
-    // if (!job->SetFlags(options)) return MakeCompilerError(*job);
+    if (!job->SetFlags(options)) return MakeCompilerError(*job);
+
     if (artifact_tx) {
       artifact_tx->WriteArtifact(
           /*label=*/"partitioner_flags", /*extension=*/"txt", /*index=*/-1,
@@ -1548,8 +1538,8 @@ PJRT_Error* ClientInstance::Compile(const PJRT_Program* program,
     if (!SetDefaultCompilerFlags(job.get())) {
       return MakeCompilerError(*job);
     }
-    // TODO: Plumb CompileOptions through.
-    // if (!job->SetFlags(options)) return MakeCompilerError(*job);
+    if (!job->SetFlags(options)) return MakeCompilerError(*job);
+
     if (artifact_tx) {
       artifact_tx->WriteArtifact(
           /*label=*/"flags", /*extension=*/"txt", /*index=*/-1,
@@ -1573,11 +1563,28 @@ PJRT_Error* ClientInstance::Compile(const PJRT_Program* program,
                            output->GetDataSize()));
     }
 
+    // calculate devices for this computation from device assignment
+    std::vector<DeviceInstance*> devices;
+
+    const auto& build_options = options.executable_build_options();
+    if (build_options.has_device_assignment()) {
+      const auto& device_assignment = build_options.device_assignment();
+      for (auto id :
+           device_assignment.computation_devices(0).replica_device_ids()) {
+        if (id < addressable_devices_.size())
+          devices.push_back(addressable_devices_[id]);
+      }
+    }
+
+    if (devices.empty()) {
+      devices = addressable_devices_;
+    }
+
     auto executable = std::make_unique<LoadedExecutableInstance>(
         *this,
         new ExecutableImage(std::move(output),
                             std::string(program->code, program->code_size)),
-        addressable_devices_);
+        devices);
     status = executable->LoadAll();
     if (!iree_status_is_ok(status)) {
       return MakeError(status);
@@ -1770,7 +1777,7 @@ void ExecutableImage::BindApi(PJRT_Api* api) {
   };
   api->PJRT_Executable_Name =
       +[](PJRT_Executable_Name_Args* args) -> PJRT_Error* {
-    IREE_TRACE_SCOPE_NAMED(PJRT_Executable_Name);
+    IREE_TRACE_SCOPE_NAMED("PJRT_Executable_Name");
     const char* dummy_name = "iree_vmfb";
     args->executable_name = dummy_name;
     args->executable_name_size = strlen(dummy_name);
@@ -2167,6 +2174,15 @@ void BindMonomorphicApi(PJRT_Api* api) {
   BindUndefineds(api);
   ErrorInstance::BindApi(api);
 
+  // PJRT_Plugin_Attributes should be implemented since it will always be
+  // called from the PJRT client in the initial phase.
+  // here we provide a blank implementation to avoid crash due to unimplemented.
+  api->PJRT_Plugin_Attributes =
+      +[](PJRT_Plugin_Attributes_Args* args) -> PJRT_Error* {
+    args->num_attributes = 0;
+    args->attributes = nullptr;
+    return nullptr;
+  };
   api->PJRT_Plugin_Initialize =
       +[](PJRT_Plugin_Initialize_Args* args) -> PJRT_Error* { return nullptr; };
 

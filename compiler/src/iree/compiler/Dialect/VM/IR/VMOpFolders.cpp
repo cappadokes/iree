@@ -1531,7 +1531,7 @@ OpFoldResult TruncI64I32Op::fold(FoldAdaptor operands) {
 
 OpFoldResult TruncF64F32Op::fold(FoldAdaptor operands) {
   return constFoldConversionOp<FloatAttr>(
-      FloatType::getF32(getContext()), operands.getOperand(),
+      Float32Type::get(getContext()), operands.getOperand(),
       [&](const APFloat &a) { return APFloat(a.convertToFloat()); });
 }
 
@@ -1597,7 +1597,7 @@ OpFoldResult ExtI32I64UOp::fold(FoldAdaptor operands) {
 
 OpFoldResult ExtF32F64Op::fold(FoldAdaptor operands) {
   return constFoldConversionOp<FloatAttr>(
-      FloatType::getF64(getContext()), operands.getOperand(),
+      Float64Type::get(getContext()), operands.getOperand(),
       [&](const APFloat &a) { return APFloat(a.convertToDouble()); });
 }
 
@@ -1674,6 +1674,16 @@ static Attribute constFoldCastOp(Type resultType, Attribute rawOperand,
 }
 
 OpFoldResult CastSI32F32Op::fold(FoldAdaptor operands) {
+  return constFoldCastOp<IntegerAttr, FloatAttr>(
+      Float32Type::get(getContext()), operands.getOperand(),
+      [&](const APInt &a) {
+        APFloat b = APFloat(0.0f);
+        b.convertFromAPInt(a, /*IsSigned=*/true, APFloat::rmNearestTiesToAway);
+        return b;
+      });
+}
+
+OpFoldResult CastSI64F32Op::fold(FoldAdaptor operands) {
   return constFoldCastOp<IntegerAttr, FloatAttr>(
       Float32Type::get(getContext()), operands.getOperand(),
       [&](const APInt &a) {

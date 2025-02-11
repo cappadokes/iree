@@ -256,6 +256,30 @@ util.func public @do_not_propagate_to_conv(%transposed_lhs: tensor<18x2x18x8xf32
 
 // -----
 
+#map = affine_map<(d0, d1, d2, d3, d4, d5, d6) -> (d0, d1 + d4, d2 + d5, d6)>
+#map1 = affine_map<(d0, d1, d2, d3, d4, d5, d6) -> (d4, d5, d6, d3)>
+#map2 = affine_map<(d0, d1, d2, d3, d4, d5, d6) -> (d0, d1, d2, d3)>
+module {
+  util.func public @do_not_propagate_to_conv_generic(%arg0: tensor<18x2x18x8xf32>, %arg1: tensor<3x3x8x32xf32>) -> tensor<2x16x16x32xf32> {
+    %0 = tensor.empty() : tensor<2x18x18x8xf32>
+    %transposed = linalg.transpose ins(%arg0 : tensor<18x2x18x8xf32>) outs(%0 : tensor<2x18x18x8xf32>) permutation = [1, 0, 2, 3]
+    %1 = tensor.empty() : tensor<2x16x16x32xf32>
+    %2 = linalg.generic {indexing_maps = [#map, #map1, #map2], iterator_types = ["parallel", "parallel", "parallel", "parallel", "reduction", "reduction", "reduction"]} ins(%transposed, %arg1 : tensor<2x18x18x8xf32>, tensor<3x3x8x32xf32>) outs(%1 : tensor<2x16x16x32xf32>) {
+    ^bb0(%in: f32, %in_0: f32, %out: f32):
+      %3 = arith.mulf %in, %in_0 : f32
+      %4 = arith.addf %out, %3 : f32
+      linalg.yield %4 : f32
+    } -> tensor<2x16x16x32xf32>
+    util.return %2 : tensor<2x16x16x32xf32>
+  }
+}
+
+// APROP-LABEL: util.func public @do_not_propagate_to_conv_generic
+//       APROP:   linalg.transpose
+//       APROP:   linalg.generic
+
+// -----
+
 util.func public @sink_through_expand_shape(%arg0: tensor<?x?x?xf32>) -> tensor<32x?x16x?x?xf32> {
   %c4 = arith.constant 4 : index
   %c3 = arith.constant 3 : index
@@ -665,3 +689,47 @@ util.func public @bubble_transpose_to_broadcast_elementwise(%arg0: tensor<2x3x4x
 //  BUBBLE-SAME:     ins(%[[ARG0]], %[[ARG1]] : tensor<2x3x4xf32>, tensor<2x4xf32>
 //       BUBBLE:     arith.addf
 //       BUBBLE:   util.return %[[ELEM]] : tensor<3x4x2xf32>
+
+// -----
+
+util.func public @bubble_transpose_v_from_attention(%q: tensor<2x10x4096x64xf16>, %k: tensor<2x10x4096x64xf16>, %quantized_v: tensor<2x10x4096x64xi32>, %quant_offset: tensor<10x64xi32>, %quant_scale: tensor<10x64xf32>, %scale: f16) -> tensor<2x10x4096x64xf16> {
+  // Dequantize int-quantization of V
+  %init_dequant = tensor.empty() : tensor<2x10x4096x64xf16>
+  %v = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>, affine_map<(d0, d1, d2, d3) -> (d1, d3)>, affine_map<(d0, d1, d2, d3) -> (d1, d3)>, affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>], iterator_types = ["parallel", "parallel", "parallel", "parallel"]} ins(%quantized_v, %quant_offset, %quant_scale : tensor<2x10x4096x64xi32>, tensor<10x64xi32>, tensor<10x64xf32>) outs(%init_dequant : tensor<2x10x4096x64xf16>) {
+  ^bb0(%in: i32, %in_0: i32, %in_1: f32, %out: f16):
+      %19 = arith.addi %in, %in_0 : i32
+      %20 = arith.sitofp %19 : i32 to f32
+      %21 = arith.mulf %20, %in_1 : f32
+      %22 = arith.truncf %21 : f32 to f16
+      linalg.yield %22 : f16
+  } -> tensor<2x10x4096x64xf16>
+
+  // Attention with transposed V
+  %init_attention = tensor.empty() : tensor<2x10x4096x64xf16>
+  %attention = iree_linalg_ext.attention {indexing_maps = [affine_map<(d0, d1, d2, d3, d4, d5) -> (d0, d1, d2, d3)>, affine_map<(d0, d1, d2, d3, d4, d5) -> (d0, d1, d4, d3)>, affine_map<(d0, d1, d2, d3, d4, d5) -> (d0, d1, d4, d5)>, affine_map<(d0, d1, d2, d3, d4, d5) -> ()>, affine_map<(d0, d1, d2, d3, d4, d5) -> (d0, d1, d2, d5)>]} ins(%q, %k, %v, %scale : tensor<2x10x4096x64xf16>, tensor<2x10x4096x64xf16>, tensor<2x10x4096x64xf16>, f16) outs(%init_attention : tensor<2x10x4096x64xf16>) {
+    ^bb0(%score: f16):
+      iree_linalg_ext.yield %score: f16
+  } -> tensor<2x10x4096x64xf16>
+  util.return %attention : tensor<2x10x4096x64xf16>
+}
+
+
+// CHECK-DAG: #[[$MAP_Q:.+]] = affine_map<(d0, d1, d2, d3, d4, d5) -> (d0, d1, d2, d3)>
+// CHECK-DAG: #[[$MAP_K:.+]] = affine_map<(d0, d1, d2, d3, d4, d5) -> (d0, d1, d4, d3)>
+// CHECK-DAG: #[[$MAP_V:.+]] = affine_map<(d0, d1, d2, d3, d4, d5) -> (d0, d1, d5, d4)>
+// CHECK-DAG: #[[$MAP_S:.+]] = affine_map<(d0, d1, d2, d3, d4, d5) -> ()>
+// CHECK-DAG: #[[$MAP_O:.+]] = affine_map<(d0, d1, d2, d3, d4, d5) -> (d0, d1, d2, d5)>
+
+// CHECK-LABEL:         util.func public @bubble_transpose_v_from_attention(
+// CHECK-SAME:         %[[ARG0:.*]]: tensor<2x10x4096x64xf16>, %[[ARG1:.*]]: tensor<2x10x4096x64xf16>, %[[ARG2:.*]]: tensor<2x10x4096x64xi32>,
+// CHECK-SAME:         %[[ARG3:.*]]: tensor<10x64xi32>, %[[ARG4:.*]]: tensor<10x64xf32>, %[[ARG5:.*]]: f16) -> tensor<2x10x4096x64xf16> {
+// CHECK:         %[[EMPTY:.*]] = tensor.empty() : tensor<2x10x4096x64xf16>
+// CHECK:         %[[DEQUANT_V:.+]] = linalg.generic
+// CHECK-SAME:    ins(%[[ARG2]], %[[ARG3]], %[[ARG4]] : tensor<2x10x4096x64xi32>, tensor<10x64xi32>, tensor<10x64xf32>)
+// CHECK-SAME:    outs(%{{.*}} : tensor<2x10x4096x64xf16>)
+// CHECK:         %[[TRANS_V:.*]] = linalg.transpose ins(%[[DEQUANT_V]] : tensor<2x10x4096x64xf16>) outs({{.*}} : tensor<2x10x64x4096xf16>) permutation = [0, 1, 3, 2]
+// CHECK:         %[[ATTN:.*]] = iree_linalg_ext.attention
+// CHECK-SAME:    {indexing_maps = [#[[$MAP_Q]], #[[$MAP_K]], #[[$MAP_V]], #[[$MAP_S]], #[[$MAP_O]]]}
+// CHECK-SAME:    ins(%[[ARG0]], %[[ARG1]], %[[TRANS_V]], %[[ARG5]] : tensor<2x10x4096x64xf16>, tensor<2x10x4096x64xf16>, tensor<2x10x64x4096xf16>, f16)
+// CHECK-SAME:    outs(%[[EMPTY]] : tensor<2x10x4096x64xf16>)
+// CHECK:         util.return %[[ATTN]] : tensor<2x10x4096x64xf16>

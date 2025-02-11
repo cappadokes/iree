@@ -94,7 +94,7 @@ bool verifyMemRefInnerDimsContiguousRowMajor(MemRefType type) {
     return true;
   }
 
-  if (failed(mlir::getStridesAndOffset(type, strides, offset))) {
+  if (failed(type.getStridesAndOffset(strides, offset))) {
     return false;
   }
 
@@ -937,8 +937,7 @@ class VMVXLowerLinalgMicrokernelsPass
                 LinalgTrivialGenericConversion, LinalgUnaryGenericConversion>(
             &getContext());
 
-    if (failed(applyPatternsAndFoldGreedily(getOperation(),
-                                            std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       return signalPassFailure();
     }
 

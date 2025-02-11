@@ -16,6 +16,7 @@ iree_cc_library(
   HDRS
     "ConversionUtils.h"
     "ElementPackingUtils.h"
+    "EmbeddedDataDirectory.h"
     "EquivalenceUtils.h"
     "FlatbufferUtils.h"
     "Folding.h"
@@ -36,6 +37,7 @@ iree_cc_library(
     "ElementPackingUtils.cpp"
     "EquivalenceUtils.cpp"
     "FlatbufferUtils.cpp"
+    "Indexing.cpp"
     "ModuleUtils.cpp"
     "OptionUtils.cpp"
     "PassUtils.cpp"

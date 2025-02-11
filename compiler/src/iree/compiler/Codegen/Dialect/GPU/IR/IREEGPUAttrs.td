@@ -56,31 +56,6 @@ def IREEGPU_LoweringConfigAttr :
     AttrParameter<"DictionaryAttr",
         "The configured fields, including tiling levels">:$attributes
   );
-  let extraClassDeclaration = [{
-    /// Helper to retrieve/set a target mma intrinsic.
-    ::mlir::iree_compiler::IREE::GPU::MmaInterfaceAttr getMmaKind() const;
-    static void setMmaKind(MLIRContext *context,
-                          SmallVectorImpl<NamedAttribute> &attrs,
-                          ::mlir::iree_compiler::IREE::GPU::MmaInterfaceAttr kind);
-
-    // TODO: Merge subgroup counts functionality into subgroup tiling level
-    //       lowering, when we have it implemented.
-    /// Helper to retrieve/set a target subgroup M/N counts.
-    std::optional<int64_t> getSubgroupMCount() const;
-    std::optional<int64_t> getSubgroupNCount() const;
-    static void setSubgroupMCount(MLIRContext *context,
-                                   SmallVectorImpl<NamedAttribute> &attrs,
-                                   int64_t subgroup_m_count);
-    static void setSubgroupNCount(MLIRContext *context,
-                                   SmallVectorImpl<NamedAttribute> &attrs,
-                                   int64_t subgroup_n_count);
-
-    /// Helper to retrieve/set a list of operand indices to promote.
-    std::optional<SmallVector<int64_t>> getPromotedOperandList() const;
-    static void setPromotedOperandList(MLIRContext *context,
-                                       SmallVectorImpl<NamedAttribute> &attrs,
-                                       ArrayRef<int64_t> operands);
-  }];
 }
 
 def IREEGPU_DerivedThreadConfig :
@@ -140,63 +115,6 @@ def IREEGPU_DotProductOpsAttr : EnumAttr<
 }
 
 //===----------------------------------------------------------------------===//
-// Base MMA vector layout
-//===----------------------------------------------------------------------===//
-
-class IREEGPU_MmaVectorLayoutAttr<string attrname, string mmaintrinsic> :
-    AttrDef<IREEGPU_Dialect, attrname, [
-  DeclareAttrInterfaceMethods<IREEGPU_MmaInterfaceAttr, [
-    "getABCElementTypes",
-    "getABCVectorTypes",
-    "getContractionLayout",
-    "getMNKShape",
-    "getSubgroupSize",
-    "getMmaScope",
-    "getASingleSubgroupLayout",
-    "getBSingleSubgroupLayout",
-    "getCSingleSubgroupLayout",
-    "buildMmaOperation",
-    "populateOperandOffsetsSizesStrides",
-    "materializeOperandConcreteShape",
-  ]>
-]> {
-  let cppNamespace = "::mlir::iree_compiler::IREE::GPU";
-
-  string baseDescription = [{
-    Attribute describing a particular shape of matrix-multiply and accumulate
-    instruction. Abstractly, all attributes of this type represent the following
-    unit of arithmetic for matrices A, B, and C.
-
-    ```
-      C += A x B
-    ```
-
-    Where the shape of matrix `A` is `[m, k]`, `B` is `[k, n]`, and
-    `C` is `[m, n]`. This intentionally leaves the layout information abstract
-    and uses interface methods to materialize layout information only when
-    needed. The shape of the mma intrinsic is stored explicitly here as that
-    information is queried frequently.
-
-    The element types for this particular mma intrinsic are |aType|, |bType|,
-    and |cType| for matrices `A`, `B`, and `C` respectively.
-
-    ######
-
-  }];
-
-
-  let parameters = (ins
-    mmaintrinsic:$intrinsic,
-    "int64_t":$mSize,
-    "int64_t":$nSize,
-    "int64_t":$kSize,
-    "::mlir::Type":$aType,
-    "::mlir::Type":$bType,
-    "::mlir::Type":$cType
-  );
-}
-
-//===----------------------------------------------------------------------===//
 // MMA intrinsic
 //===----------------------------------------------------------------------===//
 
@@ -206,34 +124,42 @@ class IREEGPU_MmaEnumAttr<EnumAttrInfo enumInfo, string name = "">
 def IREEGPU_MMAIntrinsicAttr
   : IREEGPU_MmaEnumAttr<IREEGPU_MMAIntrinsic, "mma_intrinsic">;
 
-def IREEGPU_MMAAttr : IREEGPU_MmaVectorLayoutAttr<"MMA", "MMAIntrinsicAttr"> {
+def IREEGPU_MMAAttr : AttrDef<IREEGPU_Dialect, "MMA", [
+  DeclareAttrInterfaceMethods<IREEGPU_MmaInterfaceAttr, [
+    "getABCElementTypes",
+    "getABCVectorTypes",
+    "getMNKShape",
+    "getSubgroupSize",
+    "getMmaScope",
+    "buildMmaOperation",
+    "populateOperandOffsetsSizesStrides",
+  ]>
+]> {
   let mnemonic = "mma_layout";
   let cppNamespace = "::mlir::iree_compiler::IREE::GPU";
 
-  let description = !strconcat(baseDescription, [{
-    This mma variant describes configurations for MMA ops. The |intrinsic|
-    field specifies which particular MMA intrinsic this refers to, with each
-    intrinsic implicating a specific MNK shape and operand types.
+  let description = [{
+    Attribute describing a particular shape of matrix-multiply and accumulate
+    instruction. Abstractly, all attributes of this type represent the following
+    unit of arithmetic for matrices A, B, and C.
+
+    ```
+      C += A x B
+    ```
+
+    The |intrinsic| field specifies which particular MMA intrinsic this refers
+    to, with each intrinsic implicating a specific MNK shape and operand types.
     See IREEGPUEnums.td for the definition of the intrinsics.
-  }]);
+  }];
 
-  let hasCustomAssemblyFormat = 1;
+  let parameters = (ins
+    EnumParameter<IREEGPU_MMAIntrinsic>:$intrinsic
+  );
 
-  let skipDefaultBuilders = 1;
-  let builders = [
-    AttrBuilder<(ins "MMAIntrinsic":$intrinsic)>
-  ];
+  let assemblyFormat = "`<` params `>`";
 
   let extraClassDeclaration = [{
     int64_t getBlockSize() const;
-
-    // Returns the A/B/C matrix's partial nested layout shape inside a single
-    // subgroup. Shape at each outer/thread/element level is a 2-D value,
-    // following canonical matmul order--(M, K) for A, (K, N) for B, and
-    // (M, N) for C.
-    MMASingleSubgroupLayout getASingleSubgroupLayout() const;
-    MMASingleSubgroupLayout getBSingleSubgroupLayout() const;
-    MMASingleSubgroupLayout getCSingleSubgroupLayout() const;
 
     SmallVector<VirtualMMAIntrinsic> getVirtualIntrinsics() const;
   }];
@@ -259,30 +185,22 @@ def IREEGPU_DataTiledMMAAttr :
     |intrinsic| field specifies which particular MMA intrinsic is targeted by
     the data-tiling.
 
-    The tile swizzling already happens, so the attribute does not need to
-    implement materializeOperandConcreteShape interface method. E.g., if the
-    target intrinsic is MFMA_F32_16x16x4_F32:
-      - The inner tile shape of LHS is 4x16.
-      - The inner tile shape of RHS is 4x16.
-      - The inner tile shape of ACC is 4x16x4.
-
-    Furthermore, the unrolling and interleaving can be represented with the
-    attribute. In the concept of data-tiling, we always unroll the parallel
-    dimensions (i.e., M, N dimensions) to be outermost, and interleave the
-    unrolled K dimension. I.e., the unrolled K dimension becomes the innermost
-    dimension. The constraint can be relaxed based on data-tiling needs. The
-    additional information can be added to `parameters`.
+    The other fields default to one, and that default results in a single
+    intrinsic equivalent to MMAAttr, while values greater than one result in
+    wider "kernels" consisting of multiple intrinsics, with the data layout
+    already swizzled into a tile layout that allows each intrinsic to access
+    data at an offset that's as simple as possible a mapping from the thread ID.
   }];
 
   let assemblyFormat = "`<` struct(params) `>`";
 
   let parameters = (ins
-    "::mlir::iree_compiler::IREE::GPU::MMAIntrinsicAttr":$intrinsic,
-    DefaultValuedParameter<"int64_t", "1", "Unrolling along the M dimension, on the same thread.">:$unroll_m,
-    DefaultValuedParameter<"int64_t", "1", "Unrolling along the M dimension, distributed across this many more threads.">:$subgroups_m,
-    DefaultValuedParameter<"int64_t", "1", "Unrolling along the N dimension, on the same thread.">:$unroll_n,
-    DefaultValuedParameter<"int64_t", "1", "Unrolling along the N dimension, distributed across this many more threads.">:$subgroups_n,
-    DefaultValuedParameter<"int64_t", "1", "Unrolling along the K dimension, on the same thread, with interleaved layout.">:$unroll_k
+    EnumParameter<IREEGPU_MMAIntrinsic>:$intrinsic,
+    DefaultValuedParameter<"int64_t", "1", "Intrinsic count along the M dimension.">:$intrinsics_m,
+    DefaultValuedParameter<"int64_t", "1", "Subgroup count along the M dimension.">:$subgroups_m,
+    DefaultValuedParameter<"int64_t", "1", "Intrinsic count along the N dimension.">:$intrinsics_n,
+    DefaultValuedParameter<"int64_t", "1", "Subgroup count along the N dimension.">:$subgroups_n,
+    DefaultValuedParameter<"int64_t", "1", "Intrinsic count along the K dimension, with interleaved layout.">:$intrinsics_k
   );
 }
 
@@ -297,9 +215,6 @@ def IREEGPU_VirtualMMAAttr :
     "getMNKShape",
     "getSubgroupSize",
     "getMmaScope",
-    "getASingleSubgroupLayout",
-    "getBSingleSubgroupLayout",
-    "getCSingleSubgroupLayout",
     "populateOperandOffsetsSizesStrides",
     "buildMmaOperation",
   ]>
@@ -309,7 +224,7 @@ def IREEGPU_VirtualMMAAttr :
 
   let description = [{
     This mma variant represents "virtual" MMA ops that has modification to
-    its native layouts by unrollK and/or interleave reads. The |intrinsic|
+    its native layouts by intrinsicsK and/or interleave reads. The |intrinsic|
     field represents different kinds of "Virtual" MMA Ops we found helpful.
 
     These interleaving and/or unrolling changes in the layout is especially
@@ -318,29 +233,18 @@ def IREEGPU_VirtualMMAAttr :
   }];
 
   let assemblyFormat = "`<` struct(params) `>`";
-  let builders = [
-    AttrBuilder<(ins "VirtualMMAIntrinsic":$intrinsic)>
-  ];
 
   let parameters = (ins
-    "::mlir::iree_compiler::IREE::GPU::VirtualMMAIntrinsicAttr":$intrinsic
+    EnumParameter<IREEGPU_VirtualMMAIntrinsic>:$intrinsic
   );
 
   let extraClassDeclaration = [{
     int64_t getBlockSize() const;
 
-    // Returns the A/B/C matrix's partial nested layout shape inside a single
-    // subgroup. Shape at each outer/thread/element level is a 2-D value,
-    // following canonical matmul order--(M, K) for A, (K, N) for B, and
-    // (M, N) for C.
-    MMASingleSubgroupLayout getASingleSubgroupLayout() const;
-    MMASingleSubgroupLayout getBSingleSubgroupLayout() const;
-    MMASingleSubgroupLayout getCSingleSubgroupLayout() const;
-
     // Factor to unroll K from native MMA/intrinsic size to virtual size.
     // e.g MFMA_F32_16x16x16 has K of 16, while VMFMA_F32_16x16x32 has K of 32
-    // in this example, unrollK = 32/16 = 2.
-    int64_t getUnrollK() const;
+    // in this example, intrinsicsK = 32/16 = 2.
+    int64_t getIntrinsicsK() const;
   }];
 }
 
@@ -369,15 +273,59 @@ def IREEGPU_MmaScheduleAttr : AttrDef<IREEGPU_Dialect, "MMASchedule"> {
   );
 
   let assemblyFormat = "`<` struct(params) `>`";
+}
 
-  let extraClassDeclaration = [{
-    // Returns the A/B/C matrix concrete layout targeting |contractOp|.
-    ::mlir::FailureOr<::std::tuple<VectorExt::VectorLayoutInterface,
-                                 VectorExt::VectorLayoutInterface,
-                                 VectorExt::VectorLayoutInterface>>
-      getContractionLayout(::mlir::iree_compiler::VectorContractOpInfo &opInfo,
-                           ::mlir::linalg::LinalgOp contractOp) const;
+//===----------------------------------------------------------------------===//
+// iree_gpu.gpu_encoding_layout
+//===----------------------------------------------------------------------===//
+
+def IREEGPU_GPUEncodingLayoutAttr :
+    AttrDef<IREEGPU_Dialect, "GPUEncodingLayout"> {
+  let mnemonic = "gpu_encoding_layout";
+  let summary = "The encoding layout attribute for GPU backend";
+  let description = [{
+    This attribute can implement any layout interface methods for data-tiling,
+    e.g., Codegen::LayoutAttrInterface, etc. They should be implemented
+    through external model mechanism because we do not want to relocate
+    domain-specific logic to the dialect implementation, and we can have better
+    code structure. See the implementation in
+    compiler/Codegen/ExternalInterfaces/*.
   }];
+
+  let assemblyFormat = "`<` struct(params) `>`";
+
+  let parameters = (ins
+    OptionalParameter<"::mlir::iree_compiler::IREE::GPU::TargetAttr",
+     "IREE GPU target attribute. It is expected to be used in a pass scope, "
+     "but not the final IR output.">:$targetAttr
+  );
+}
+
+//===----------------------------------------------------------------------===//
+// iree_gpu.gpu_pad_layout
+//===----------------------------------------------------------------------===//
+
+def IREEGPU_GPUPadLayoutAttr : AttrDef<IREEGPU_Dialect, "GPUPadLayout"> {
+  let mnemonic = "gpu_pad_layout";
+  let summary = "The padded encoding layout attribute for GPU targets.";
+  let assemblyFormat = "`<` struct(params) `>`";
+
+  let description = [{
+    Describes padding preferences for a given GPU target.
+    This attribute can implement any encoding interface for data-tiling,
+    e.g., Encoding::EncodingLayoutAttrInterface, etc. They should be implemented
+    through external model mechanism because we do not want to relocate
+    domain-specific logic to the dialect implementation, and we can have better
+    code structure. See the implementation in
+    compiler/Codegen/ExternalInterfaces/*.
+  }];
+
+  let parameters = (ins
+    // Relevant target properties that will later allow us to decide the
+    // serialized pad layout.
+    "uint32_t":$cache_line_bytes,
+    "uint32_t":$cache_sets
+  );
 }
 
 //===----------------------------------------------------------------------===//
@@ -456,6 +404,8 @@ def IREEGPU_TargetChipAttr : AttrDef<IREEGPU_Dialect, "TargetChip"> {
   let parameters = (ins
     "uint32_t":$wgp_count,
 
+    // An optional SKU identifier to distinguish different models.
+    OptionalParameter<"StringAttr">:$sku,
     // An optional extra dict
     // This field allows to inject more features/limits not supported in the
     // above list for better flexibility.
@@ -558,6 +508,26 @@ def IREEGPU_LaneIdAttr : AttrDef<IREEGPU_Dialect, "LaneId", [
   let description = [{
     An attribute for mapping scf.forall ops to subgroup lanes.
   }];
+}
+
+//===---------------------------------------------------------------------===//
+// iree_gpu.ukernel_config
+//===---------------------------------------------------------------------===//
+
+def IREEGPU_UKernelConfigAttr  :
+    AttrDef<IREEGPU_Dialect, "UKernelConfig", []> {
+  let mnemonic = "ukernel_config";
+  let summary = "An attribute specifying a ukernel that an op can lower to.";
+  let description = [{
+    An attribute that can be applied to any operation to specify that it has
+    been matched with a ukernel that is a legal lowering for it.
+  }];
+  let assemblyFormat = "`<` struct(params) `>`";
+  let parameters = (ins
+       "StringAttr":$name,
+       "DictionaryAttr":$def_attrs,
+       DefaultValuedParameter<"int64_t", "0", "Size in bytes of shared memory workspace">:$shared_memory_bytes
+  );
 }
 
 //===----------------------------------------------------------------------===//
