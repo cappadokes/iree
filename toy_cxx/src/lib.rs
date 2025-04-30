@@ -68,7 +68,10 @@ fn place_slices(data: &CxxVector<UnplacedSlice>) -> Vec<i64> {
             Job {
                 size:               s.size as ByteSteps,
                 birth:              s.start as ByteSteps,
-                death:              s.end as ByteSteps,
+                // `idealloc` core has exclusive lifetime semantics.
+                // IREE has inclusive. To convert and keep aliasing
+                // intact, we add one to the buffer's deallocation time.
+                death:              s.end as ByteSteps + 1,
                 req_size:           s.size as ByteSteps,
                 alignment:          Some(s.align as ByteSteps),
                 contents:           None,
