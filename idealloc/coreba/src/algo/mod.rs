@@ -38,9 +38,7 @@ pub fn idealloc(
     max_lives:          u32,
 ) -> (PlacedJobRegistry, ByteSteps) {
     // Set a big enough stack size, since core algo is recursive.
-    if let Ok(_) = rayon::ThreadPoolBuilder::new().stack_size(1048576 * 1024).build_global() {}
-    else { println!("WARNING: Stack size couldn't be changed!"); }
-
+    let _tpb = rayon::ThreadPoolBuilder::new().stack_size(1048576 * 1024).build_global().unwrap();
     // Measure total allocation time.
     let total_start = Instant::now();
 
@@ -49,7 +47,7 @@ pub fn idealloc(
     // first to see if any of said cases hold. Along the way we
     // set up the context of the aforementioned heavy lifting, so
     // as to avoid repeating computations if it ends up being needed.
-    let (target_load, best_opt, placement) = match prelude_analysis(original_input) {
+    let (target_load, best_opt, placement) = match prelude_analysis(original_input, start_address) {
         AnalysisResult::NoOverlap(jobs) => {
             // Non-overlapping jobs can all be put in the
             // same offset.
@@ -123,6 +121,7 @@ pub fn idealloc(
                     (baby.descr.id, Rc::new(baby))})
                 .collect();
             let ig_reg = (ig, reg);
+            debug_assert!(placement_is_valid(&ig_reg));
 
             // Initializations related to the last
             // invocation of C15.
