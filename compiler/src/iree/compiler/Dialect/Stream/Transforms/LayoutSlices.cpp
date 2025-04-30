@@ -71,14 +71,6 @@ packStaticSlicesGreedily(IREE::Stream::ResourcePackOp packOp, Value baseOffset,
   int64_t offsetAlignment = resourceConfig.getMinBufferOffsetAlignment();
   int64_t rangeAlignment = resourceConfig.getMinBufferRangeAlignment();
 
-  struct Reservation {
-    const Slice *slice = nullptr;
-    int64_t staticOffset = 0;
-    int64_t staticSize = 0;
-  };
-
-  std::list<Reservation> reservations;
-  int64_t highwaterMark = 0;
   for (auto &slice : slices) {
     int64_t staticSize =
         cast<arith::ConstantIndexOp>(slice.dynamicSize.getDefiningOp()).value();
@@ -104,6 +96,14 @@ packStaticSlicesGreedily(IREE::Stream::ResourcePackOp packOp, Value baseOffset,
   rust::cxxbridge1::Vec<int64_t> offsets = place_slices(trojan);
   size_t i = 0;
 
+  struct Reservation {
+    const Slice *slice = nullptr;
+    int64_t staticOffset = 0;
+    int64_t staticSize = 0;
+  };
+
+  std::list<Reservation> reservations;
+  int64_t highwaterMark = 0;
   for (auto &slice : slices) {
     int64_t bestOffset = offsets[i];
     int64_t alignedSize = trojan[i].size;
